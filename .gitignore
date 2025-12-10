@@ -1,3 +1,9 @@
+# default settings from renv initialization
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+
 # History files
 .Rhistory
 .Rapp.history

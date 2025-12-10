@@ -1,0 +1,262 @@
+---
+title: "Average Number of Children by Political Views (Heterosexual Respondents)"
+author: "Your Name"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+## Load packages
+
+```{r packages}
+library(gssr)
+library(survey)
+library(dplyr)
+library(ggplot2)
+```
+
+## Load GSS data (run once)
+
+```{r load-data, cache=TRUE}
+# Load the GSS cumulative data file
+# This is cached so it doesn't reload every time you knit
+data(gss_all)
+```
+
+## Parameters
+
+```{r parameters}
+# Set minimum age filter
+min_age <- 35
+
+# Set minimum year (design variables available from 1975 onwards)
+min_year <- 1975
+
+# Pooling window: how many surveys to pool together (centered)
+pool_surveys <- 7
+```
+
+## Prepare and filter data
+
+```{r prepare-data}
+# Select relevant variables, filter, and create political view categories
+# Restrict to heterosexual respondents only (sexornt == 3)
+gss_subset <- gss_all %>%
+  select(year, childs, polviews, age, sexornt, vpsu, vstrat, wtssps) %>%
+  filter(
+    !is.na(childs), 
+    !is.na(polviews), 
+    !is.na(wtssps),
+    !is.na(age),
+    !is.na(sexornt),
+    age >= min_age,
+    year >= min_year,
+    sexornt == 3  # Heterosexual or straight only
+  ) %>%
+  mutate(
+    polviews_grouped = case_when(
+      polviews %in% 1:3 ~ "Liberal",
+      polviews == 4 ~ "Moderate",
+      polviews %in% 5:7 ~ "Conservative",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(polviews_grouped))
+
+# Verify data availability
+cat("Total observations (heterosexual respondents only):", nrow(gss_subset), "\n")
+cat("Year range:", min(gss_subset$year), "to", max(gss_subset$year), "\n")
+cat("\nObservations by political views:\n")
+table(gss_subset$polviews_grouped) %>% print()
+cat("\nObservations by year (last 10):\n")
+table(gss_subset$year) %>% tail(10) %>% print()
+```
+
+## Create survey design object
+
+```{r survey-design}
+# Set option for handling strata with single PSUs
+options(survey.lonely.psu = "adjust")
+
+# Use full complex survey design with clustering and stratification
+gss_design <- svydesign(
+  ids = ~vpsu,
+  strata = ~vstrat,
+  weights = ~wtssps,
+  data = gss_subset,
+  nest = TRUE
+)
+```
+
+## Compute estimates with pooled surveys
+
+```{r compute-pooled-means}
+if (pool_surveys > 1) {
+  # Get all unique survey years in chronological order
+  survey_years <- sort(unique(gss_subset$year))
+  
+  cat("Survey years available:", paste(survey_years, collapse = ", "), "\n")
+  cat("Total number of surveys:", length(survey_years), "\n\n")
+  
+  # Determine pooling radius (how many surveys before/after)
+  pool_radius <- floor(pool_surveys / 2)
+  
+  # Initialize results list
+  pooled_results <- list()
+  
+  # For each survey year, pool surrounding surveys
+  for (i in seq_along(survey_years)) {
+    target_year <- survey_years[i]
+    
+    # Determine which survey indices to pool
+    start_idx <- max(1, i - pool_radius)
+    end_idx <- min(length(survey_years), i + pool_radius)
+    years_to_pool <- survey_years[start_idx:end_idx]
+    
+    # Get data indices for these years
+    pooled_data_indices <- which(gss_subset$year %in% years_to_pool)
+    
+    if (length(pooled_data_indices) > 0) {
+      # Create subset design for pooled surveys
+      pooled_design <- gss_design[pooled_data_indices, ]
+      
+      # Compute estimates for this pooled period
+      est <- svyby(
+        formula = ~childs,
+        by = ~polviews_grouped,
+        design = pooled_design,
+        FUN = svymean,
+        na.rm = TRUE
+      )
+      
+      # Add year identifier
+      est$year <- target_year
+      est$surveys_pooled <- paste(years_to_pool, collapse = ",")
+      est$n_surveys <- length(years_to_pool)
+      
+      pooled_results[[length(pooled_results) + 1]] <- est
+    }
+  }
+  
+  # Combine all results
+  results_df <- do.call(rbind, pooled_results)
+  cat(paste0("Pooling ", pool_surveys, " surveys (centered) for each estimate\n"))
+  
+} else {
+  # No pooling - compute survey-by-survey estimates
+  results <- svyby(
+    formula = ~childs,
+    by = ~polviews_grouped + year,
+    design = gss_design,
+    FUN = svymean,
+    na.rm = TRUE
+  )
+  results_df <- as.data.frame(results)
+  results_df$surveys_pooled <- as.character(results_df$year)
+  results_df$n_surveys <- 1
+  cat("No pooling - using single survey estimates\n")
+}
+
+# Show recent results
+cat("\nRecent results:\n")
+head(results_df %>% arrange(desc(year)), 15)
+```
+
+## Visualize trends
+
+```{r visualize, fig.width=10, fig.height=6}
+# Calculate confidence intervals
+results_df <- results_df %>%
+  mutate(
+    ci_lower = childs - 1.96 * se,
+    ci_upper = childs + 1.96 * se
+  )
+
+# Plot average number of children over time by political views with confidence intervals
+ggplot(results_df, aes(x = year, y = childs, color = polviews_grouped, fill = polviews_grouped)) +
+  geom_ribbon(aes(ymin = ci_lower, ymax = ci_upper), alpha = 0.2, color = NA) +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 2) +
+  scale_color_manual(
+    values = c("Liberal" = "#2166AC", "Moderate" = "#762A83", "Conservative" = "#B2182B"),
+    name = "Political Views"
+  ) +
+  scale_fill_manual(
+    values = c("Liberal" = "#2166AC", "Moderate" = "#762A83", "Conservative" = "#B2182B"),
+    name = "Political Views"
+  ) +
+  labs(
+    title = "Average Number of Children by Political Views Over Time",
+    subtitle = paste0(
+      "General Social Survey - Heterosexual Respondents Only (age >= ", min_age, 
+      ", years >= ", min_year,
+      ifelse(pool_surveys > 1, paste0(", pooling ", pool_surveys, " surveys"), ""),
+      ")\nShaded areas represent 95% confidence intervals"
+    ),
+    x = "Year",
+    y = "Average Number of Children"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "bottom",
+    plot.title = element_text(size = 14, face = "bold"),
+    axis.title = element_text(size = 11)
+  )
+```
+
+## Summary statistics
+
+```{r summary-stats}
+# Overall averages by political view (using most recent available data)
+recent_years <- max(results_df$year, na.rm = TRUE) - 4
+
+overall_recent <- results_df %>%
+  filter(year >= recent_years) %>%
+  group_by(polviews_grouped) %>%
+  summarise(
+    mean_childs = mean(childs, na.rm = TRUE),
+    mean_se = mean(se, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+knitr::kable(
+  overall_recent,
+  digits = 3,
+  col.names = c("Political Views", "Mean Children", "Mean Std. Error"),
+  caption = paste0("Recent Average (", recent_years, "-", max(results_df$year, na.rm = TRUE), ") - Heterosexual Respondents")
+)
+```
+
+## Summary table by year
+
+```{r summary-table}
+# Create a summary table showing recent years
+results_table <- results_df %>%
+  filter(year >= 2000) %>%
+  select(year, polviews_grouped, childs, se, n_surveys, surveys_pooled) %>%
+  arrange(desc(year), polviews_grouped)
+
+knitr::kable(
+  results_table,
+  digits = 3,
+  col.names = c("Year", "Political Views", "Mean Children", "Std. Error", "N Surveys", "Surveys Pooled"),
+  caption = paste0(
+    "Average Number of Children by Political Views (2000 onwards) - Heterosexual Respondents",
+    ifelse(pool_surveys > 1, paste0(" - pooling ", pool_surveys, " surveys"), "")
+  )
+)
+```
+
+## Notes
+
+- This analysis is **restricted to heterosexual respondents only** (sexornt == 3)
+- Filters for respondents aged **`r min_age`** or older
+- Analysis includes data from **`r min_year`** onwards (when design variables became available)
+- Political views are grouped as: Liberal (1-3), Moderate (4), Conservative (5-7)
+- Uses `wtssps` (the recommended post-stratification weight for 1972-2024 per GSS documentation)
+- **Pooling approach**: Properly pools the raw survey data from **`r pool_surveys`** surveys (centered, accounting for irregular survey intervals) and computes a single weighted estimate on the pooled sample
+- Properly accounts for the GSS complex survey design using clustering (`vpsu`) and stratification (`vstrat`)
+- The `childs` variable records the number of children respondents have had
