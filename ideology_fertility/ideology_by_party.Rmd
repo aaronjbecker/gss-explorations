@@ -33,7 +33,7 @@ data(gss_all)
 min_year <- 1975
 
 # Pooling window: how many surveys to pool together (centered)
-pool_surveys <- 7
+pool_surveys <- 5
 ```
 
 ## Prepare and filter data
@@ -215,34 +215,6 @@ ggplot(results_df, aes(x = year, y = proportion, fill = ideology)) +
     axis.title = element_text(size = 11),
     panel.spacing = unit(1.5, "lines")
   )
-```
-
-## Alternative view: Side-by-side comparison
-
-```{r side-by-side-plot, fig.width=14, fig.height=5}
-# Create side-by-side stacked area plots
-ggplot(results_df, aes(x = year, y = proportion, fill = ideology)) +
-  geom_area(position = "stack", alpha = 0.8) +
-  facet_wrap(~party, ncol = 3) +
-  scale_fill_manual(
-    values = ideology_colors,
-    name = "Political Ideology"
-  ) +
-  scale_y_continuous(labels = scales::percent_format()) +
-  labs(
-    title = "Ideological Composition of Party Identification Groups",
-    subtitle = paste0("General Social Survey (pooling ", pool_surveys, " surveys)"),
-    x = "Year",
-    y = "Proportion"
-  ) +
-  theme_minimal() +
-  theme(
-    legend.position = "bottom",
-    plot.title = element_text(size = 14, face = "bold"),
-    strip.text = element_text(size = 11, face = "bold"),
-    axis.title = element_text(size = 11)
-  ) +
-  guides(fill = guide_legend(nrow = 2))
 ```
 
 ## Summary: Recent composition

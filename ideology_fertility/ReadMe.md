@@ -17,8 +17,11 @@ Assumed filters to reproduce JBM's chart:
 * All adults age 35+?
 * There's some amount of pooling across survey years being applied; I don't have the exact number, but pooling 7 survey instances (centered) results in lines that are broadly consistent.
 
+## package installation and notes
 We can use the `gssr` R package to download the full GSS dataset; by pinning a particular version, we can retrieve data that contains US Census divisions (version 0.7.0).
 Commit SHA is `ed90704`, full line is `remotes::install_github("kjhealy/gssr@ed90704")`
+
+[This blog post](https://blog.thecoatlessprofessor.com/programming/cpp/r-compiler-tools-for-rcpp-on-macos/index.html) explains how to install the R compiler tools for Rcpp on macOS, which is required for some `tidyverse` packages. Includes links to version-appropriate installers for dependencies like `gnufortran`.
 
 ## Related sources
 JBM cites this blog post in his FT article: https://ifstudies.org/blog/the-conservative-fertility-advantage
