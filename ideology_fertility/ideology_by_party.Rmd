@@ -1,0 +1,331 @@
+---
+title: "Ideological Composition of Party Identification Groups Over Time"
+author: "Your Name"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+## Load packages
+
+```{r packages}
+library(gssr)
+library(survey)
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+```
+
+## Load GSS data (run once)
+
+```{r load-data, cache=TRUE}
+# Load the GSS cumulative data file
+data(gss_all)
+```
+
+## Parameters
+
+```{r parameters}
+# Set minimum year (design variables available from 1975 onwards)
+min_year <- 1975
+
+# Pooling window: how many surveys to pool together (centered)
+pool_surveys <- 7
+```
+
+## Prepare and filter data
+
+```{r prepare-data}
+# Select relevant variables and create categories
+# No age filter for this analysis
+gss_subset <- gss_all %>%
+  select(year, partyid, polviews, vpsu, vstrat, wtssps) %>%
+  filter(
+    !is.na(partyid), 
+    !is.na(polviews),
+    !is.na(wtssps),
+    year >= min_year,
+    partyid <= 6,  # Exclude "Other party" (value 7)
+    polviews <= 7  # Valid political views
+  ) %>%
+  mutate(
+    party_grouped = case_when(
+      partyid %in% 0:2 ~ "Democrat",
+      partyid == 3 ~ "Independent",
+      partyid %in% 4:6 ~ "Republican",
+      TRUE ~ NA_character_
+    ),
+    ideology_label = case_when(
+      polviews == 1 ~ "Extremely Liberal",
+      polviews == 2 ~ "Liberal",
+      polviews == 3 ~ "Slightly Liberal",
+      polviews == 4 ~ "Moderate",
+      polviews == 5 ~ "Slightly Conservative",
+      polviews == 6 ~ "Conservative",
+      polviews == 7 ~ "Extremely Conservative",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(party_grouped), !is.na(ideology_label))
+
+# Verify data availability
+cat("Total observations:", nrow(gss_subset), "\n")
+cat("Year range:", min(gss_subset$year), "to", max(gss_subset$year), "\n")
+cat("\nObservations by party identification:\n")
+table(gss_subset$party_grouped) %>% print()
+cat("\nObservations by ideology:\n")
+table(gss_subset$ideology_label) %>% print()
+```
+
+## Create survey design object
+
+```{r survey-design}
+# Set option for handling strata with single PSUs
+options(survey.lonely.psu = "adjust")
+
+# Use full complex survey design
+gss_design <- svydesign(
+  ids = ~vpsu,
+  strata = ~vstrat,
+  weights = ~wtssps,
+  data = gss_subset,
+  nest = TRUE
+)
+```
+
+## Compute ideology shares within each party over time
+
+```{r compute-shares}
+# Get all unique survey years
+survey_years <- sort(unique(gss_subset$year))
+pool_radius <- floor(pool_surveys / 2)
+
+cat("Survey years available:", paste(survey_years, collapse = ", "), "\n")
+cat("Total number of surveys:", length(survey_years), "\n\n")
+
+# Initialize results list
+pooled_results <- list()
+
+# For each survey year, pool surrounding surveys
+for (i in seq_along(survey_years)) {
+  target_year <- survey_years[i]
+  
+  # Determine which survey indices to pool
+  start_idx <- max(1, i - pool_radius)
+  end_idx <- min(length(survey_years), i + pool_radius)
+  years_to_pool <- survey_years[start_idx:end_idx]
+  
+  # Get data indices for these years
+  pooled_data_indices <- which(gss_subset$year %in% years_to_pool)
+  
+  if (length(pooled_data_indices) > 0) {
+    # Create subset design for pooled surveys
+    pooled_design <- gss_design[pooled_data_indices, ]
+    
+    # For each party group, compute the distribution across ideologies
+    for (party in c("Democrat", "Independent", "Republican")) {
+      # Subset to just this party
+      party_indices <- which(gss_subset$year[pooled_data_indices] %in% years_to_pool & 
+                             gss_subset$party_grouped[pooled_data_indices] == party)
+      
+      if (length(party_indices) > 0) {
+        party_design <- pooled_design[party_indices, ]
+        
+        # Compute proportions of each ideology within this party
+        ideology_props <- svymean(
+          ~ideology_label,
+          design = party_design,
+          na.rm = TRUE
+        )
+        
+        # Extract just the proportions (not standard errors)
+        prop_values <- as.numeric(ideology_props)
+        prop_names <- gsub("ideology_label", "", names(ideology_props))
+        
+        # Create data frame - replicate scalar values to match number of ideologies
+        props_df <- data.frame(
+          year = rep(target_year, length(prop_names)),
+          party = rep(party, length(prop_names)),
+          ideology = prop_names,
+          proportion = prop_values,
+          n_surveys = rep(length(years_to_pool), length(prop_names)),
+          stringsAsFactors = FALSE
+        )
+        
+        pooled_results[[length(pooled_results) + 1]] <- props_df
+      }
+    }
+  }
+}
+
+# Combine all results
+results_df <- do.call(rbind, pooled_results)
+
+# Order ideology levels
+results_df$ideology <- factor(
+  results_df$ideology,
+  levels = c("Extremely Liberal", "Liberal", "Slightly Liberal", "Moderate",
+             "Slightly Conservative", "Conservative", "Extremely Conservative")
+)
+
+cat("Composition analysis complete\n")
+head(results_df, 20)
+```
+
+## Stacked area plots
+
+```{r stacked-plots, fig.width=12, fig.height=10}
+# Create color palette for ideologies (blue to red)
+ideology_colors <- c(
+  "Extremely Liberal" = "#053061",
+  "Liberal" = "#2166AC",
+  "Slightly Liberal" = "#4393C3",
+  "Moderate" = "#762A83",
+  "Slightly Conservative" = "#D6604D",
+  "Conservative" = "#B2182B",
+  "Extremely Conservative" = "#67001F"
+)
+
+# Create stacked area plot for each party
+ggplot(results_df, aes(x = year, y = proportion, fill = ideology)) +
+  geom_area(position = "stack", alpha = 0.8) +
+  facet_wrap(~party, ncol = 1) +
+  scale_fill_manual(
+    values = ideology_colors,
+    name = "Political Ideology"
+  ) +
+  scale_y_continuous(labels = scales::percent_format()) +
+  labs(
+    title = "Ideological Composition of Party Identification Groups Over Time",
+    subtitle = paste0(
+      "General Social Survey (pooling ", pool_surveys, " surveys)\n",
+      "Stacked areas show proportion of each ideology within party group"
+    ),
+    x = "Year",
+    y = "Proportion"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "right",
+    plot.title = element_text(size = 14, face = "bold"),
+    strip.text = element_text(size = 12, face = "bold"),
+    axis.title = element_text(size = 11),
+    panel.spacing = unit(1.5, "lines")
+  )
+```
+
+## Alternative view: Side-by-side comparison
+
+```{r side-by-side-plot, fig.width=14, fig.height=5}
+# Create side-by-side stacked area plots
+ggplot(results_df, aes(x = year, y = proportion, fill = ideology)) +
+  geom_area(position = "stack", alpha = 0.8) +
+  facet_wrap(~party, ncol = 3) +
+  scale_fill_manual(
+    values = ideology_colors,
+    name = "Political Ideology"
+  ) +
+  scale_y_continuous(labels = scales::percent_format()) +
+  labs(
+    title = "Ideological Composition of Party Identification Groups",
+    subtitle = paste0("General Social Survey (pooling ", pool_surveys, " surveys)"),
+    x = "Year",
+    y = "Proportion"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "bottom",
+    plot.title = element_text(size = 14, face = "bold"),
+    strip.text = element_text(size = 11, face = "bold"),
+    axis.title = element_text(size = 11)
+  ) +
+  guides(fill = guide_legend(nrow = 2))
+```
+
+## Summary: Recent composition
+
+```{r recent-composition}
+# Show composition in most recent period
+recent_year <- max(results_df$year)
+
+recent_composition <- results_df %>%
+  filter(year == recent_year) %>%
+  select(party, ideology, proportion) %>%
+  arrange(party, ideology)
+
+# Create a wide format table
+recent_wide <- recent_composition %>%
+  pivot_wider(names_from = ideology, values_from = proportion, values_fill = 0)
+
+knitr::kable(
+  recent_wide,
+  digits = 3,
+  caption = paste0("Ideological Composition by Party Group (", recent_year, ")")
+)
+```
+
+## Trend analysis: Polarization metrics
+
+```{r polarization-metrics}
+# Calculate mean ideology position over time for each party
+# (treating ideology as ordinal: 1=Extremely Liberal to 7=Extremely Conservative)
+ideology_numeric <- results_df %>%
+  mutate(
+    ideology_num = case_when(
+      ideology == "Extremely Liberal" ~ 1,
+      ideology == "Liberal" ~ 2,
+      ideology == "Slightly Liberal" ~ 3,
+      ideology == "Moderate" ~ 4,
+      ideology == "Slightly Conservative" ~ 5,
+      ideology == "Conservative" ~ 6,
+      ideology == "Extremely Conservative" ~ 7
+    )
+  )
+
+mean_ideology <- ideology_numeric %>%
+  group_by(party, year) %>%
+  summarise(
+    mean_position = sum(ideology_num * proportion),
+    .groups = "drop"
+  )
+
+# Plot mean ideological position over time
+ggplot(mean_ideology, aes(x = year, y = mean_position, color = party)) +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 2) +
+  scale_color_manual(
+    values = c("Democrat" = "#2166AC", "Independent" = "#762A83", "Republican" = "#B2182B"),
+    name = "Party"
+  ) +
+  scale_y_continuous(
+    breaks = 1:7,
+    labels = c("Extremely\nLiberal", "Liberal", "Slightly\nLiberal", "Moderate", 
+               "Slightly\nConservative", "Conservative", "Extremely\nConservative")
+  ) +
+  labs(
+    title = "Mean Ideological Position by Party Over Time",
+    subtitle = paste0("General Social Survey (pooling ", pool_surveys, " surveys)"),
+    x = "Year",
+    y = "Mean Ideology Position"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "bottom",
+    plot.title = element_text(size = 14, face = "bold"),
+    axis.text.y = element_text(size = 8)
+  )
+```
+
+## Notes
+
+- This analysis examines the **ideological composition** within party identification groups
+- **No age filter** is applied (includes all respondents)
+- Party groups: Democrat (0-2), Independent (3), Republican (4-6)
+- Ideology measured at 7 levels from Extremely Liberal to Extremely Conservative
+- Uses **`r pool_surveys`-survey pooling** to smooth trends
+- Stacked areas show the proportion of each ideology level within each party group
+- Uses `wtssps` (recommended post-stratification weight for 1972-2024)
+- Properly accounts for GSS complex survey design

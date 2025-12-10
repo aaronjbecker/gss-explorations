@@ -4,6 +4,9 @@
 .RData
 .Ruserdata
 
+# mac os 
+.DS_Store
+
 # History files
 .Rhistory
 .Rapp.history
