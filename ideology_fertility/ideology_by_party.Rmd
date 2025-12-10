@@ -291,6 +291,400 @@ ggplot(mean_ideology, aes(x = year, y = mean_position, color = party)) +
   )
 ```
 
+## Overall ideology distribution over time
+
+```{r overall-ideology, fig.width=12, fig.height=6}
+# Compute overall ideology distribution (all respondents)
+# Use svyby to get proportions with standard errors
+overall_ideology_results <- list()
+
+for (i in seq_along(survey_years)) {
+  target_year <- survey_years[i]
+
+  # Determine which survey indices to pool
+  start_idx <- max(1, i - pool_radius)
+  end_idx <- min(length(survey_years), i + pool_radius)
+  years_to_pool <- survey_years[start_idx:end_idx]
+
+  # Get data indices for these years
+  pooled_data_indices <- which(gss_subset$year %in% years_to_pool)
+
+  if (length(pooled_data_indices) > 0) {
+    # Create subset design for pooled surveys
+    pooled_design <- gss_design[pooled_data_indices, ]
+
+    # Use svyby to get proportions with standard errors
+    ideology_props_by <- svyby(
+      formula = ~ideology_label,
+      by = ~all_respondents,
+      design = pooled_design,
+      FUN = svymean,
+      na.rm = TRUE
+    )
+
+    # Extract proportions and standard errors
+    prop_cols <- grep("^ideology_label[^s]", names(ideology_props_by), value = TRUE)
+    se_cols <- grep("^se\\.ideology_label", names(ideology_props_by), value = TRUE)
+
+    prop_names <- gsub("ideology_label", "", prop_cols)
+    prop_values <- as.numeric(ideology_props_by[1, prop_cols])
+    se_values <- as.numeric(ideology_props_by[1, se_cols])
+
+    # Create data frame with confidence intervals
+    props_df <- data.frame(
+      year = rep(target_year, length(prop_names)),
+      ideology = prop_names,
+      proportion = prop_values,
+      se = se_values,
+      ci_lower = prop_values - 1.96 * se_values,
+      ci_upper = prop_values + 1.96 * se_values,
+      n_surveys = rep(length(years_to_pool), length(prop_names)),
+      stringsAsFactors = FALSE
+    )
+
+    overall_ideology_results[[length(overall_ideology_results) + 1]] <- props_df
+  }
+}
+
+# Combine results
+overall_ideology_df <- do.call(rbind, overall_ideology_results)
+
+# Order ideology levels
+overall_ideology_df$ideology <- factor(
+  overall_ideology_df$ideology,
+  levels = c("Extremely Liberal", "Liberal", "Slightly Liberal", "Moderate",
+             "Slightly Conservative", "Conservative", "Extremely Conservative")
+)
+
+# Create stacked area plot
+ggplot(overall_ideology_df, aes(x = year, y = proportion, fill = ideology)) +
+  geom_area(position = "stack", alpha = 0.8) +
+  scale_fill_manual(
+    values = ideology_colors,
+    name = "Political Ideology"
+  ) +
+  scale_y_continuous(labels = scales::percent_format()) +
+  labs(
+    title = "Ideological Distribution of All GSS Respondents Over Time",
+    subtitle = paste0(
+      "General Social Survey (pooling ", pool_surveys, " surveys)\n",
+      "Stacked areas show proportion of each ideology level"
+    ),
+    x = "Year",
+    y = "Proportion"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "right",
+    plot.title = element_text(size = 14, face = "bold"),
+    axis.title = element_text(size = 11)
+  )
+```
+
+## Ideology trends with confidence intervals
+
+```{r ideology-ci, fig.width=12, fig.height=8}
+# Create line plot with confidence intervals for ideology
+ggplot(overall_ideology_df, aes(x = year, y = proportion, color = ideology, fill = ideology)) +
+  geom_ribbon(aes(ymin = ci_lower, ymax = ci_upper), alpha = 0.2, color = NA) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 1.5) +
+  scale_color_manual(
+    values = ideology_colors,
+    name = "Political Ideology"
+  ) +
+  scale_fill_manual(
+    values = ideology_colors,
+    name = "Political Ideology"
+  ) +
+  scale_y_continuous(labels = scales::percent_format()) +
+  labs(
+    title = "Ideological Trends Over Time with 95% Confidence Intervals",
+    subtitle = paste0(
+      "General Social Survey (pooling ", pool_surveys, " surveys)\n",
+      "Shaded areas represent 95% confidence intervals"
+    ),
+    x = "Year",
+    y = "Proportion"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "bottom",
+    plot.title = element_text(size = 14, face = "bold"),
+    axis.title = element_text(size = 11)
+  )
+```
+
+## Overall party affiliation distribution over time (ungrouped)
+
+```{r overall-party-ungrouped, fig.width=12, fig.height=6}
+# First, create ungrouped party labels
+gss_subset_party <- gss_all %>%
+  select(year, partyid, polviews, vpsu, vstrat, wtssps) %>%
+  filter(
+    !is.na(partyid),
+    !is.na(polviews),
+    !is.na(wtssps),
+    year >= min_year,
+    partyid <= 6,  # Exclude "Other party" (value 7)
+    polviews <= 7  # Valid political views
+  ) %>%
+  mutate(
+    party_ungrouped = case_when(
+      partyid == 0 ~ "Strong Democrat",
+      partyid == 1 ~ "Not Strong Democrat",
+      partyid == 2 ~ "Independent, Near Democrat",
+      partyid == 3 ~ "Independent",
+      partyid == 4 ~ "Independent, Near Republican",
+      partyid == 5 ~ "Not Strong Republican",
+      partyid == 6 ~ "Strong Republican",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(party_ungrouped))
+
+# Create survey design for ungrouped party analysis
+gss_design_party <- svydesign(
+  ids = ~vpsu,
+  strata = ~vstrat,
+  weights = ~wtssps,
+  data = gss_subset_party,
+  nest = TRUE
+)
+
+# Compute overall party distribution (ungrouped)
+overall_party_ungrouped_results <- list()
+
+for (i in seq_along(survey_years)) {
+  target_year <- survey_years[i]
+
+  # Determine which survey indices to pool
+  start_idx <- max(1, i - pool_radius)
+  end_idx <- min(length(survey_years), i + pool_radius)
+  years_to_pool <- survey_years[start_idx:end_idx]
+
+  # Get data indices for these years
+  pooled_data_indices <- which(gss_subset_party$year %in% years_to_pool)
+
+  if (length(pooled_data_indices) > 0) {
+    # Create subset design for pooled surveys
+    pooled_design <- gss_design_party[pooled_data_indices, ]
+
+    # Compute proportions of each party affiliation
+    party_props <- svymean(
+      ~party_ungrouped,
+      design = pooled_design,
+      na.rm = TRUE
+    )
+
+    # Extract proportions
+    prop_values <- as.numeric(party_props)
+    prop_names <- gsub("party_ungrouped", "", names(party_props))
+
+    # Create data frame
+    props_df <- data.frame(
+      year = rep(target_year, length(prop_names)),
+      party = prop_names,
+      proportion = prop_values,
+      n_surveys = rep(length(years_to_pool), length(prop_names)),
+      stringsAsFactors = FALSE
+    )
+
+    overall_party_ungrouped_results[[length(overall_party_ungrouped_results) + 1]] <- props_df
+  }
+}
+
+# Combine results
+overall_party_ungrouped_df <- do.call(rbind, overall_party_ungrouped_results)
+
+# Order party levels
+overall_party_ungrouped_df$party <- factor(
+  overall_party_ungrouped_df$party,
+  levels = c("Strong Democrat", "Not Strong Democrat", "Independent, Near Democrat",
+             "Independent",
+             "Independent, Near Republican", "Not Strong Republican", "Strong Republican")
+)
+
+# Create color palette for parties (blue to red)
+party_ungrouped_colors <- c(
+  "Strong Democrat" = "#053061",
+  "Not Strong Democrat" = "#2166AC",
+  "Independent, Near Democrat" = "#4393C3",
+  "Independent" = "#762A83",
+  "Independent, Near Republican" = "#D6604D",
+  "Not Strong Republican" = "#B2182B",
+  "Strong Republican" = "#67001F"
+)
+
+# Create stacked area plot
+ggplot(overall_party_ungrouped_df, aes(x = year, y = proportion, fill = party)) +
+  geom_area(position = "stack", alpha = 0.8) +
+  scale_fill_manual(
+    values = party_ungrouped_colors,
+    name = "Party Identification"
+  ) +
+  scale_y_continuous(labels = scales::percent_format()) +
+  labs(
+    title = "Party Affiliation Distribution of All GSS Respondents Over Time (Ungrouped)",
+    subtitle = paste0(
+      "General Social Survey (pooling ", pool_surveys, " surveys)\\n",
+      "Stacked areas show proportion of each party identification level"
+    ),
+    x = "Year",
+    y = "Proportion"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "right",
+    plot.title = element_text(size = 14, face = "bold"),
+    axis.title = element_text(size = 11)
+  )
+```
+
+## Overall party affiliation distribution over time (grouped)
+
+```{r overall-party-grouped, fig.width=12, fig.height=6}
+# Compute overall party distribution (grouped: Democrat, Independent, Republican)
+# Create a dummy grouping variable since we want proportions across all respondents
+gss_subset$all_respondents <- "All"
+
+# Recreate survey design with the new variable
+gss_design <- svydesign(
+  ids = ~vpsu,
+  strata = ~vstrat,
+  weights = ~wtssps,
+  data = gss_subset,
+  nest = TRUE
+)
+
+overall_party_grouped_results <- list()
+
+for (i in seq_along(survey_years)) {
+  target_year <- survey_years[i]
+
+  # Determine which survey indices to pool
+  start_idx <- max(1, i - pool_radius)
+  end_idx <- min(length(survey_years), i + pool_radius)
+  years_to_pool <- survey_years[start_idx:end_idx]
+
+  # Get data indices for these years
+  pooled_data_indices <- which(gss_subset$year %in% years_to_pool)
+
+  if (length(pooled_data_indices) > 0) {
+    # Create subset design for pooled surveys
+    pooled_design <- gss_design[pooled_data_indices, ]
+
+    # Use svyby to get proportions with standard errors
+    # We compute the proportion of each party group within "all respondents"
+    party_props_by <- svyby(
+      formula = ~party_grouped,
+      by = ~all_respondents,
+      design = pooled_design,
+      FUN = svymean,
+      na.rm = TRUE
+    )
+
+    # Extract proportions and standard errors
+    # svyby returns columns: all_respondents, party_groupedDemocrat, se.party_groupedDemocrat, etc.
+    prop_cols <- grep("^party_grouped[^s]", names(party_props_by), value = TRUE)
+    se_cols <- grep("^se\\.party_grouped", names(party_props_by), value = TRUE)
+
+    prop_names <- gsub("party_grouped", "", prop_cols)
+    prop_values <- as.numeric(party_props_by[1, prop_cols])
+    se_values <- as.numeric(party_props_by[1, se_cols])
+
+    # Create data frame with confidence intervals
+    props_df <- data.frame(
+      year = rep(target_year, length(prop_names)),
+      party = prop_names,
+      proportion = prop_values,
+      se = se_values,
+      ci_lower = prop_values - 1.96 * se_values,
+      ci_upper = prop_values + 1.96 * se_values,
+      n_surveys = rep(length(years_to_pool), length(prop_names)),
+      stringsAsFactors = FALSE
+    )
+
+    overall_party_grouped_results[[length(overall_party_grouped_results) + 1]] <- props_df
+  }
+}
+
+# Combine results
+overall_party_grouped_df <- do.call(rbind, overall_party_grouped_results)
+
+# Order party levels
+overall_party_grouped_df$party <- factor(
+  overall_party_grouped_df$party,
+  levels = c("Democrat", "Independent", "Republican")
+)
+
+# Create color palette for grouped parties
+party_grouped_colors <- c(
+  "Democrat" = "#2166AC",
+  "Independent" = "#762A83",
+  "Republican" = "#B2182B"
+)
+
+# Create stacked area plot
+ggplot(overall_party_grouped_df, aes(x = year, y = proportion, fill = party)) +
+  geom_area(position = "stack", alpha = 0.8) +
+  scale_fill_manual(
+    values = party_grouped_colors,
+    name = "Party Identification"
+  ) +
+  scale_y_continuous(labels = scales::percent_format()) +
+  labs(
+    title = "Party Affiliation Distribution of All GSS Respondents Over Time (Grouped)",
+    subtitle = paste0(
+      "General Social Survey (pooling ", pool_surveys, " surveys)\\n",
+      "Democrat (0-2), Independent (3), Republican (4-6)"
+    ),
+    x = "Year",
+    y = "Proportion"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "right",
+    plot.title = element_text(size = 14, face = "bold"),
+    axis.title = element_text(size = 11)
+  )
+```
+
+## Party affiliation trends with confidence intervals
+
+```{r party-grouped-ci, fig.width=12, fig.height=6}
+# Create line plot with confidence intervals
+ggplot(overall_party_grouped_df, aes(x = year, y = proportion, color = party, fill = party)) +
+  geom_ribbon(aes(ymin = ci_lower, ymax = ci_upper), alpha = 0.2, color = NA) +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 2) +
+  scale_color_manual(
+    values = party_grouped_colors,
+    name = "Party Identification"
+  ) +
+  scale_fill_manual(
+    values = party_grouped_colors,
+    name = "Party Identification"
+  ) +
+  scale_y_continuous(labels = scales::percent_format()) +
+  labs(
+    title = "Party Affiliation Trends Over Time with 95% Confidence Intervals",
+    subtitle = paste0(
+      "General Social Survey (pooling ", pool_surveys, " surveys)\n",
+      "Democrat (0-2), Independent (3), Republican (4-6)\n",
+      "Shaded areas represent 95% confidence intervals"
+    ),
+    x = "Year",
+    y = "Proportion"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "bottom",
+    plot.title = element_text(size = 14, face = "bold"),
+    axis.title = element_text(size = 11)
+  )
+```
+
 ## Notes
 
 - This analysis examines the **ideological composition** within party identification groups
