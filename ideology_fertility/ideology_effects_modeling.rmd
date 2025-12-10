@@ -1,0 +1,662 @@
+---
+title: "Political Ideology Effects on Fertility: Regression Modeling"
+author: "Your Name"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+## Load packages
+
+```{r packages}
+library(gssr)
+library(survey)
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(knitr)
+library(broom)
+```
+
+## Load GSS data (run once)
+
+```{r load-data, cache=TRUE}
+# Load the GSS cumulative data file
+data(gss_all)
+```
+
+## Parameters
+
+```{r parameters}
+# Set minimum age filter for base analysis
+min_age <- 35
+
+# Set minimum year (design variables available from 1975 onwards)
+min_year <- 1975
+
+# Period split year
+split_year <- 1995
+```
+
+## Prepare and filter data
+
+```{r prepare-data}
+# Select relevant variables, filter, and create categorical variables
+gss_subset <- gss_all %>%
+  select(year, childs, polviews, age, sex, sexornt, region, xnorcsiz, dwelown, vpsu, vstrat, wtssps) %>%
+  filter(
+    !is.na(childs),
+    !is.na(polviews),
+    !is.na(wtssps),
+    !is.na(age),
+    !is.na(region),
+    age >= min_age,
+    year >= min_year
+  ) %>%
+  mutate(
+    # Political ideology groups (factor with Moderate as reference)
+    polviews_grouped = case_when(
+      polviews %in% 1:3 ~ "Liberal",
+      polviews == 4 ~ "Moderate",
+      polviews %in% 5:7 ~ "Conservative",
+      TRUE ~ NA_character_
+    ),
+    # Convert to factor with Moderate as reference category
+    polviews_factor = factor(polviews_grouped, levels = c("Moderate", "Liberal", "Conservative")),
+
+    # Time period
+    period = if_else(year < split_year, "Pre-1995", "Post-1995"),
+
+    # Center year within each period for interpretability
+    year_centered = case_when(
+      period == "Pre-1995" ~ year - mean(year[period == "Pre-1995"], na.rm = TRUE),
+      period == "Post-1995" ~ year - mean(year[period == "Post-1995"], na.rm = TRUE)
+    ),
+
+    # Center age at 45
+    age_centered = age - 45,
+
+    # Sex
+    female = if_else(sex == 2, 1, 0),
+
+    # Region labels
+    region_label = case_when(
+      region == 1 ~ "New England",
+      region == 2 ~ "Middle Atlantic",
+      region == 3 ~ "East North Central",
+      region == 4 ~ "West North Central",
+      region == 5 ~ "South Atlantic",
+      region == 6 ~ "East South Central",
+      region == 7 ~ "West South Central",
+      region == 8 ~ "Mountain",
+      region == 9 ~ "Pacific",
+      TRUE ~ NA_character_
+    ),
+
+    # Community size groups (collapse into fewer categories for modeling)
+    community_type = case_when(
+      xnorcsiz %in% c(1, 2) ~ "Central City",
+      xnorcsiz %in% c(3, 4, 5, 6) ~ "Suburb/Unincorporated",
+      xnorcsiz %in% c(7, 8) ~ "Small City/Town",
+      xnorcsiz %in% c(9, 10) ~ "Rural",
+      TRUE ~ NA_character_
+    ),
+
+    # Homeownership
+    homeowner = case_when(
+      dwelown == 1 ~ 1,
+      dwelown == 2 ~ 0,
+      TRUE ~ NA_real_
+    )
+  ) %>%
+  filter(!is.na(polviews_grouped))
+
+# Verify data availability
+cat("Total observations:", nrow(gss_subset), "\n")
+cat("Year range:", min(gss_subset$year), "to", max(gss_subset$year), "\n")
+cat("\nObservations by period:\n")
+table(gss_subset$period) %>% print()
+cat("\nObservations by ideology:\n")
+table(gss_subset$polviews_grouped) %>% print()
+```
+
+## Create survey design objects
+
+```{r survey-design}
+# Set option for handling strata with single PSUs
+options(survey.lonely.psu = "adjust")
+
+# Create design objects for each period
+gss_design_pre <- gss_subset %>%
+  filter(period == "Pre-1995") %>%
+  svydesign(
+    ids = ~vpsu,
+    strata = ~vstrat,
+    weights = ~wtssps,
+    data = .,
+    nest = TRUE
+  )
+
+gss_design_post <- gss_subset %>%
+  filter(period == "Post-1995") %>%
+  svydesign(
+    ids = ~vpsu,
+    strata = ~vstrat,
+    weights = ~wtssps,
+    data = .,
+    nest = TRUE
+  )
+
+cat("Pre-1995 design:", nrow(gss_design_pre), "observations\n")
+cat("Post-1995 design:", nrow(gss_design_post), "observations\n")
+```
+
+## Model 1: All Respondents (Age >= 35)
+
+```{r model-all-respondents}
+cat("### All Respondents (Age >= 35) ###\n\n")
+
+# Filter to complete cases for this analysis
+design_pre_all <- subset(gss_design_pre,
+                          !is.na(polviews_factor) & !is.na(age_centered) &
+                          !is.na(region_label) &
+                          !is.na(community_type) & !is.na(homeowner))
+
+design_post_all <- subset(gss_design_post,
+                           !is.na(polviews_factor) & !is.na(age_centered) &
+                           !is.na(region_label) &
+                           !is.na(community_type) & !is.na(homeowner))
+
+cat("Pre-1995 complete cases:", nrow(design_pre_all), "\n")
+cat("Post-1995 complete cases:", nrow(design_post_all), "\n\n")
+
+# Pre-1995 model
+model_pre_all <- svyglm(
+  childs ~ polviews_factor + year_centered + age_centered +
+    region_label + community_type + homeowner,
+  design = design_pre_all,
+  family = gaussian()
+)
+
+# Post-1995 model
+model_post_all <- svyglm(
+  childs ~ polviews_factor + year_centered + age_centered +
+    region_label + community_type + homeowner,
+  design = design_post_all,
+  family = gaussian()
+)
+
+# Extract and display results
+results_all_pre <- tidy(model_pre_all, conf.int = TRUE) %>%
+  mutate(period = "Pre-1995", subgroup = "All (Age 35+)")
+
+results_all_post <- tidy(model_post_all, conf.int = TRUE) %>%
+  mutate(period = "Post-1995", subgroup = "All (Age 35+)")
+
+cat("Pre-1995 Model Summary:\n")
+print(summary(model_pre_all))
+cat("\n\nPost-1995 Model Summary:\n")
+print(summary(model_post_all))
+```
+
+## Model 2: Respondents Over 45
+
+```{r model-over-45}
+cat("\n### Respondents Over 45 ###\n\n")
+
+# Filter to age > 45
+design_pre_45 <- subset(gss_design_pre,
+                         age > 45 & !is.na(polviews_factor) & !is.na(age_centered) &
+                         !is.na(region_label) &
+                         !is.na(community_type) & !is.na(homeowner))
+
+design_post_45 <- subset(gss_design_post,
+                          age > 45 & !is.na(polviews_factor) & !is.na(age_centered) &
+                          !is.na(region_label) &
+                          !is.na(community_type) & !is.na(homeowner))
+
+cat("Pre-1995 complete cases (age > 45):", nrow(design_pre_45), "\n")
+cat("Post-1995 complete cases (age > 45):", nrow(design_post_45), "\n\n")
+
+# Pre-1995 model
+model_pre_45 <- svyglm(
+  childs ~ polviews_factor + year_centered + age_centered +
+    region_label + community_type + homeowner,
+  design = design_pre_45,
+  family = gaussian()
+)
+
+# Post-1995 model
+model_post_45 <- svyglm(
+  childs ~ polviews_factor + year_centered + age_centered +
+    region_label + community_type + homeowner,
+  design = design_post_45,
+  family = gaussian()
+)
+
+# Extract results
+results_45_pre <- tidy(model_pre_45, conf.int = TRUE) %>%
+  mutate(period = "Pre-1995", subgroup = "Age 45+")
+
+results_45_post <- tidy(model_post_45, conf.int = TRUE) %>%
+  mutate(period = "Post-1995", subgroup = "Age 45+")
+
+cat("Pre-1995 Model Summary (Age 45+):\n")
+print(summary(model_pre_45))
+cat("\n\nPost-1995 Model Summary (Age 45+):\n")
+print(summary(model_post_45))
+```
+
+## Model 3: Women Only
+
+```{r model-women}
+cat("\n### Women Only (Age >= 35) ###\n\n")
+
+# Filter to women
+design_pre_women <- subset(gss_design_pre,
+                            female == 1 & !is.na(polviews_factor) & !is.na(age_centered) &
+                            !is.na(region_label) &
+                            !is.na(community_type) & !is.na(homeowner))
+
+design_post_women <- subset(gss_design_post,
+                             female == 1 & !is.na(polviews_factor) & !is.na(age_centered) &
+                             !is.na(region_label) &
+                             !is.na(community_type) & !is.na(homeowner))
+
+cat("Pre-1995 complete cases (women):", nrow(design_pre_women), "\n")
+cat("Post-1995 complete cases (women):", nrow(design_post_women), "\n\n")
+
+# Pre-1995 model
+model_pre_women <- svyglm(
+  childs ~ polviews_factor + year_centered + age_centered +
+    region_label + community_type + homeowner,
+  design = design_pre_women,
+  family = gaussian()
+)
+
+# Post-1995 model
+model_post_women <- svyglm(
+  childs ~ polviews_factor + year_centered + age_centered +
+    region_label + community_type + homeowner,
+  design = design_post_women,
+  family = gaussian()
+)
+
+# Extract results
+results_women_pre <- tidy(model_pre_women, conf.int = TRUE) %>%
+  mutate(period = "Pre-1995", subgroup = "Women (Age 35+)")
+
+results_women_post <- tidy(model_post_women, conf.int = TRUE) %>%
+  mutate(period = "Post-1995", subgroup = "Women (Age 35+)")
+
+cat("Pre-1995 Model Summary (Women):\n")
+print(summary(model_pre_women))
+cat("\n\nPost-1995 Model Summary (Women):\n")
+print(summary(model_post_women))
+```
+
+## Model 4: Women Over 45
+
+```{r model-women-45}
+cat("\n### Women Over 45 ###\n\n")
+
+# Filter to women over 45
+design_pre_women45 <- subset(gss_design_pre,
+                              female == 1 & age > 45 & !is.na(polviews_factor) &
+                              !is.na(age_centered) &
+                              !is.na(region_label) & !is.na(community_type) &
+                              !is.na(homeowner))
+
+design_post_women45 <- subset(gss_design_post,
+                               female == 1 & age > 45 & !is.na(polviews_factor) &
+                               !is.na(age_centered) &
+                               !is.na(region_label) & !is.na(community_type) &
+                               !is.na(homeowner))
+
+cat("Pre-1995 complete cases (women 45+):", nrow(design_pre_women45), "\n")
+cat("Post-1995 complete cases (women 45+):", nrow(design_post_women45), "\n\n")
+
+# Pre-1995 model
+model_pre_women45 <- svyglm(
+  childs ~ polviews_factor + year_centered + age_centered +
+    region_label + community_type + homeowner,
+  design = design_pre_women45,
+  family = gaussian()
+)
+
+# Post-1995 model
+model_post_women45 <- svyglm(
+  childs ~ polviews_factor + year_centered + age_centered +
+    region_label + community_type + homeowner,
+  design = design_post_women45,
+  family = gaussian()
+)
+
+# Extract results
+results_women45_pre <- tidy(model_pre_women45, conf.int = TRUE) %>%
+  mutate(period = "Pre-1995", subgroup = "Women (Age 45+)")
+
+results_women45_post <- tidy(model_post_women45, conf.int = TRUE) %>%
+  mutate(period = "Post-1995", subgroup = "Women (Age 45+)")
+
+cat("Pre-1995 Model Summary (Women 45+):\n")
+print(summary(model_pre_women45))
+cat("\n\nPost-1995 Model Summary (Women 45+):\n")
+print(summary(model_post_women45))
+```
+
+## Combine all results
+
+```{r combine-results}
+# Combine all model results
+all_results <- bind_rows(
+  results_all_pre, results_all_post,
+  results_45_pre, results_45_post,
+  results_women_pre, results_women_post,
+  results_women45_pre, results_women45_post
+)
+
+# Create cleaner variable names for display
+all_results <- all_results %>%
+  mutate(
+    variable_clean = case_when(
+      term == "(Intercept)" ~ "Intercept",
+      term == "polviews_factorLiberal" ~ "Liberal (vs. Moderate)",
+      term == "polviews_factorConservative" ~ "Conservative (vs. Moderate)",
+      term == "year_centered" ~ "Year (centered)",
+      term == "age_centered" ~ "Age (centered at 45)",
+      grepl("^region_label", term) ~ paste0("Region: ", gsub("region_label", "", term)),
+      grepl("^community_type", term) ~ paste0("Community: ", gsub("community_type", "", term)),
+      term == "homeowner" ~ "Homeowner",
+      TRUE ~ term
+    )
+  )
+
+# Save for later use
+saveRDS(all_results, "model_results.rds")
+```
+
+## Summary Tables
+
+### Table 1: Ideology Effects Across All Models
+
+```{r table-ideology}
+ideology_effects <- all_results %>%
+  filter(term %in% c("polviews_factorLiberal", "polviews_factorConservative")) %>%
+  select(subgroup, period, variable_clean, estimate, std.error, statistic, p.value, conf.low, conf.high) %>%
+  arrange(subgroup, period, variable_clean)
+
+kable(
+  ideology_effects,
+  digits = 4,
+  col.names = c("Subgroup", "Period", "Ideology Group", "Estimate", "Std. Error", "t-statistic", "p-value", "CI Lower", "CI Upper"),
+  caption = "Effect of Political Ideology on Number of Children (Reference: Moderate)"
+)
+```
+
+### Table 2: All Coefficients - Pre-1995
+
+```{r table-pre-1995}
+pre_1995_coefs <- all_results %>%
+  filter(period == "Pre-1995", term != "(Intercept)") %>%
+  select(subgroup, variable_clean, estimate, std.error, p.value) %>%
+  arrange(subgroup, variable_clean)
+
+kable(
+  pre_1995_coefs,
+  digits = 4,
+  col.names = c("Subgroup", "Variable", "Estimate", "Std. Error", "p-value"),
+  caption = "All Regression Coefficients: Pre-1995 Period"
+)
+```
+
+### Table 3: All Coefficients - Post-1995
+
+```{r table-post-1995}
+post_1995_coefs <- all_results %>%
+  filter(period == "Post-1995", term != "(Intercept)") %>%
+  select(subgroup, variable_clean, estimate, std.error, p.value) %>%
+  arrange(subgroup, variable_clean)
+
+kable(
+  post_1995_coefs,
+  digits = 4,
+  col.names = c("Subgroup", "Variable", "Estimate", "Std. Error", "p-value"),
+  caption = "All Regression Coefficients: Post-1995 Period"
+)
+```
+
+## Visualization: Ideology Effect
+
+```{r plot-ideology-effect, fig.width=12, fig.height=7}
+# Plot ideology coefficients with confidence intervals
+ideology_plot_data <- all_results %>%
+  filter(term %in% c("polviews_factorLiberal", "polviews_factorConservative")) %>%
+  mutate(
+    subgroup = factor(subgroup, levels = c("All (Age 35+)", "Age 45+", "Women (Age 35+)", "Women (Age 45+)")),
+    period = factor(period, levels = c("Pre-1995", "Post-1995")),
+    ideology_group = if_else(term == "polviews_factorLiberal", "Liberal", "Conservative"),
+    ideology_group = factor(ideology_group, levels = c("Liberal", "Conservative"))
+  )
+
+ggplot(ideology_plot_data, aes(x = subgroup, y = estimate, fill = period)) +
+  geom_col(position = position_dodge(width = 0.8), width = 0.7) +
+  geom_errorbar(
+    aes(ymin = conf.low, ymax = conf.high),
+    position = position_dodge(width = 0.8),
+    width = 0.25
+  ) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray30") +
+  facet_wrap(~ideology_group, ncol = 1) +
+  scale_fill_manual(
+    values = c("Pre-1995" = "#2166AC", "Post-1995" = "#B2182B"),
+    name = "Time Period"
+  ) +
+  labs(
+    title = "Effect of Political Ideology on Number of Children",
+    subtitle = "Reference category: Moderate | Controlling for year, age, region, community type, and homeownership\nPositive values = more children than moderates; Negative values = fewer children than moderates",
+    x = "Subgroup",
+    y = "Coefficient Estimate (difference from Moderates)"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 14, face = "bold"),
+    plot.subtitle = element_text(size = 9),
+    axis.text.x = element_text(angle = 15, hjust = 1),
+    legend.position = "bottom",
+    strip.text = element_text(face = "bold", size = 11)
+  )
+```
+
+## Visualization: Key Control Variables
+
+```{r plot-controls, fig.width=12, fig.height=6}
+# Select key control variables to visualize
+key_controls <- c("year_centered", "age_centered", "homeowner")
+
+control_plot_data <- all_results %>%
+  filter(term %in% key_controls) %>%
+  mutate(
+    subgroup = factor(subgroup, levels = c("All (Age 35+)", "Age 45+", "Women (Age 35+)", "Women (Age 45+)")),
+    period = factor(period, levels = c("Pre-1995", "Post-1995")),
+    variable_clean = factor(variable_clean, levels = c("Year (centered)", "Age (centered at 45)", "Homeowner"))
+  )
+
+ggplot(control_plot_data, aes(x = subgroup, y = estimate, fill = period)) +
+  geom_col(position = position_dodge(width = 0.8), width = 0.7) +
+  geom_errorbar(
+    aes(ymin = conf.low, ymax = conf.high),
+    position = position_dodge(width = 0.8),
+    width = 0.25
+  ) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray30") +
+  facet_wrap(~variable_clean, scales = "free_y", ncol = 2) +
+  scale_fill_manual(
+    values = c("Pre-1995" = "#2166AC", "Post-1995" = "#B2182B"),
+    name = "Time Period"
+  ) +
+  labs(
+    title = "Effect of Control Variables on Number of Children",
+    subtitle = "Survey-weighted regression estimates with 95% confidence intervals",
+    x = "Subgroup",
+    y = "Coefficient Estimate"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 14, face = "bold"),
+    plot.subtitle = element_text(size = 10),
+    axis.text.x = element_text(angle = 30, hjust = 1, size = 8),
+    legend.position = "bottom",
+    strip.text = element_text(face = "bold", size = 10)
+  )
+```
+
+## Visualization: Regional Effects (All Respondents)
+
+```{r plot-regional, fig.width=12, fig.height=6}
+# Plot regional coefficients for "All" subgroup
+regional_plot_data <- all_results %>%
+  filter(grepl("^region_label", term), subgroup == "All (Age 35+)") %>%
+  mutate(
+    region = gsub("region_label", "", term),
+    period = factor(period, levels = c("Pre-1995", "Post-1995"))
+  ) %>%
+  arrange(estimate)
+
+ggplot(regional_plot_data, aes(x = reorder(region, estimate), y = estimate, fill = period)) +
+  geom_col(position = position_dodge(width = 0.8), width = 0.7) +
+  geom_errorbar(
+    aes(ymin = conf.low, ymax = conf.high),
+    position = position_dodge(width = 0.8),
+    width = 0.25
+  ) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray30") +
+  scale_fill_manual(
+    values = c("Pre-1995" = "#2166AC", "Post-1995" = "#B2182B"),
+    name = "Time Period"
+  ) +
+  labs(
+    title = "Regional Effects on Number of Children (All Respondents, Age 35+)",
+    subtitle = "Relative to reference region (New England)\nPositive values indicate more children than reference",
+    x = "Census Region",
+    y = "Coefficient Estimate"
+  ) +
+  coord_flip() +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 14, face = "bold"),
+    plot.subtitle = element_text(size = 10),
+    legend.position = "bottom"
+  )
+```
+
+## Visualization: Community Type Effects (All Respondents)
+
+```{r plot-community, fig.width=10, fig.height=5}
+# Plot community type coefficients for "All" subgroup
+community_plot_data <- all_results %>%
+  filter(grepl("^community_type", term), subgroup == "All (Age 35+)") %>%
+  mutate(
+    community = gsub("community_type", "", term),
+    period = factor(period, levels = c("Pre-1995", "Post-1995"))
+  )
+
+ggplot(community_plot_data, aes(x = community, y = estimate, fill = period)) +
+  geom_col(position = position_dodge(width = 0.8), width = 0.7) +
+  geom_errorbar(
+    aes(ymin = conf.low, ymax = conf.high),
+    position = position_dodge(width = 0.8),
+    width = 0.25
+  ) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray30") +
+  scale_fill_manual(
+    values = c("Pre-1995" = "#2166AC", "Post-1995" = "#B2182B"),
+    name = "Time Period"
+  ) +
+  labs(
+    title = "Community Type Effects on Number of Children (All Respondents, Age 35+)",
+    subtitle = "Relative to reference category (Central City)\nPositive values indicate more children than reference",
+    x = "Community Type",
+    y = "Coefficient Estimate"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 14, face = "bold"),
+    plot.subtitle = element_text(size = 10),
+    axis.text.x = element_text(angle = 15, hjust = 1),
+    legend.position = "bottom"
+  )
+```
+
+## Model Diagnostics
+
+```{r diagnostics}
+# Extract R-squared values (note: for survey designs, this is pseudo R-squared)
+cat("### Model Fit Statistics ###\n\n")
+
+models_list <- list(
+  "Pre-1995, All (35+)" = model_pre_all,
+  "Post-1995, All (35+)" = model_post_all,
+  "Pre-1995, Age 45+" = model_pre_45,
+  "Post-1995, Age 45+" = model_post_45,
+  "Pre-1995, Women (35+)" = model_pre_women,
+  "Post-1995, Women (35+)" = model_post_women,
+  "Pre-1995, Women (45+)" = model_pre_women45,
+  "Post-1995, Women (45+)" = model_post_women45
+)
+
+for (model_name in names(models_list)) {
+  model <- models_list[[model_name]]
+  cat(model_name, ":\n")
+  cat("  AIC:", AIC(model), "\n")
+  cat("  Observations:", nobs(model), "\n\n")
+}
+```
+
+## Key Findings Summary
+
+```{r summary-findings}
+cat("### Summary of Ideology Effects ###\n\n")
+
+ideology_summary <- ideology_effects %>%
+  mutate(
+    significant = if_else(p.value < 0.05, "Yes", "No"),
+    direction = case_when(
+      estimate > 0 & p.value < 0.05 ~ "MORE children than Moderates",
+      estimate < 0 & p.value < 0.05 ~ "FEWER children than Moderates",
+      TRUE ~ "No significant difference"
+    )
+  ) %>%
+  select(subgroup, period, variable_clean, estimate, p.value, significant, direction)
+
+kable(
+  ideology_summary,
+  digits = 4,
+  col.names = c("Subgroup", "Period", "Ideology Group", "Coefficient", "p-value", "Significant?", "Direction"),
+  caption = "Summary: Political Ideology and Fertility (Reference: Moderate)"
+)
+```
+
+## Notes
+
+- This analysis uses survey-weighted generalized linear models (`survey::svyglm()`) which properly account for the GSS complex survey design (clustering, stratification, and post-stratification weights)
+- Data is split into two periods: **Pre-1995** (1975-1994) and **Post-1995** (1995-2022)
+- **Political ideology**: Three-category grouping with **Moderate** as the reference category
+  - Liberal: polviews 1-3 (extremely liberal, liberal, slightly liberal)
+  - Moderate: polviews 4 (moderate)
+  - Conservative: polviews 5-7 (slightly conservative, conservative, extremely conservative)
+- **Age**: Centered at 45 years for interpretability
+- **Sexual orientation not included**: The GSS did not collect sexual orientation data until the 2000s, so this variable is excluded to allow analysis of the Pre-1995 period
+- **Reference categories**:
+  - Political ideology: Moderate
+  - Region: New England (first alphabetically)
+  - Community type: Central City
+  - Homeownership: Renter
+- **Interpretation**:
+  - Ideology coefficients show the difference in number of children compared to Moderates
+  - Positive coefficients indicate more children than the reference group
+  - Negative coefficients indicate fewer children than the reference group
+- All models control for year (centered within period), age, region, community type, and homeownership status
