@@ -67,7 +67,14 @@ gss_subset <- gss_all %>%
       polviews == 6 ~ "Conservative",
       polviews == 7 ~ "Extremely Conservative",
       TRUE ~ NA_character_
-    )
+    ),
+    # Follow gssr guidance: ensure survey variables are numeric and create
+    # year-specific strata to avoid collisions when pooling across years
+    vpsu = as.numeric(vpsu),
+    vstrat = as.numeric(vstrat),
+    wtssps = as.numeric(wtssps),
+    stratvar = interaction(year, vstrat, drop = TRUE),
+    all_respondents = "All"
   ) %>%
   filter(!is.na(party_grouped), !is.na(ideology_label))
 
@@ -85,11 +92,12 @@ table(gss_subset$ideology_label) %>% print()
 ```{r survey-design}
 # Set option for handling strata with single PSUs
 options(survey.lonely.psu = "adjust")
+options(na.action = "na.pass")
 
 # Use full complex survey design
 gss_design <- svydesign(
   ids = ~vpsu,
-  strata = ~vstrat,
+  strata = ~stratvar,
   weights = ~wtssps,
   data = gss_subset,
   nest = TRUE
@@ -439,14 +447,18 @@ gss_subset_party <- gss_all %>%
       partyid == 5 ~ "Not Strong Republican",
       partyid == 6 ~ "Strong Republican",
       TRUE ~ NA_character_
-    )
+    ),
+    vpsu = as.numeric(vpsu),
+    vstrat = as.numeric(vstrat),
+    wtssps = as.numeric(wtssps),
+    stratvar = interaction(year, vstrat, drop = TRUE)
   ) %>%
   filter(!is.na(party_ungrouped))
 
 # Create survey design for ungrouped party analysis
 gss_design_party <- svydesign(
   ids = ~vpsu,
-  strata = ~vstrat,
+  strata = ~stratvar,
   weights = ~wtssps,
   data = gss_subset_party,
   nest = TRUE
@@ -545,13 +557,10 @@ ggplot(overall_party_ungrouped_df, aes(x = year, y = proportion, fill = party)) 
 
 ```{r overall-party-grouped, fig.width=12, fig.height=6}
 # Compute overall party distribution (grouped: Democrat, Independent, Republican)
-# Create a dummy grouping variable since we want proportions across all respondents
-gss_subset$all_respondents <- "All"
-
 # Recreate survey design with the new variable
 gss_design <- svydesign(
   ids = ~vpsu,
-  strata = ~vstrat,
+  strata = ~stratvar,
   weights = ~wtssps,
   data = gss_subset,
   nest = TRUE
