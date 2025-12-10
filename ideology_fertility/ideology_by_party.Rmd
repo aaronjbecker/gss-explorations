@@ -177,7 +177,7 @@ head(results_df, 20)
 
 ## Stacked area plots
 
-```{r stacked-plots, fig.width=12, fig.height=10}
+```{r stacked-plots, fig.width=10, fig.height=16}
 # Create color palette for ideologies (blue to red)
 ideology_colors <- c(
   "Extremely Liberal" = "#053061",
