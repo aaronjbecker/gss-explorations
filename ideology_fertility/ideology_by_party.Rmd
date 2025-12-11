@@ -41,8 +41,8 @@ pool_surveys <- 5
 ```{r prepare-data}
 # Select relevant variables and create categories
 # No age filter for this analysis
-gss_subset <- gss_all %>%
-  select(year, partyid, polviews, vpsu, vstrat, wtssps) %>%
+gss_subset <- gss_all |>
+  select(year, partyid, polviews, vpsu, vstrat, wtssps) |>
   filter(
     !is.na(partyid), 
     !is.na(polviews),
@@ -50,7 +50,7 @@ gss_subset <- gss_all %>%
     year >= min_year,
     partyid <= 6,  # Exclude "Other party" (value 7)
     polviews <= 7  # Valid political views
-  ) %>%
+  ) |>
   mutate(
     party_grouped = case_when(
       partyid %in% 0:2 ~ "Democrat",
@@ -75,19 +75,28 @@ gss_subset <- gss_all %>%
     wtssps = as.numeric(wtssps),
     stratvar = interaction(year, vstrat, drop = TRUE),
     all_respondents = "All"
-  ) %>%
+  ) |>
   filter(!is.na(party_grouped), !is.na(ideology_label))
 
 # Verify data availability
 cat("Total observations:", nrow(gss_subset), "\n")
 cat("Year range:", min(gss_subset$year), "to", max(gss_subset$year), "\n")
 cat("\nObservations by party identification:\n")
-table(gss_subset$party_grouped) %>% print()
+table(gss_subset$party_grouped) |> print()
 cat("\nObservations by ideology:\n")
-table(gss_subset$ideology_label) %>% print()
+table(gss_subset$ideology_label) |> print()
 ```
 
 ## Create survey design object
+
+Survey data need their complex design accounted for: the GSS is a stratified, clustered sample with weights to recover population estimates.[^1] Ignoring that structure inflates precision and can bias point estimates, especially when pooling many years. We therefore build a design object before computing any proportions.
+
+[^1]: Stratified sampling: the survey first divides the population into buckets (strata) like regions or demographic groups, then samples within each so all buckets are represented. Clustered sampling: instead of sampling individuals all over the map, the survey samples groups (PSUs) such as geographic areas and interviews multiple people inside each, which is cheaper but creates correlation within clusters.
+
+Before building the survey design we follow the gssr guidance for pooling across years:
+- GSS reuses `vstrat` codes across years, so we build a year-specific stratum ID `stratvar = interaction(year, vstrat, drop = TRUE)` to keep strata unique when multiple years are pooled.
+- We keep PSUs as provided (`vpsu`) and weights (`wtssps`, recommended 1972–2024 post-stratification weight) and set `nest = TRUE` to respect strata nesting.
+- `survey.lonely.psu = "adjust"` handles single-PSU strata produced by the interaction, and `na.action = "na.pass"` avoids dropping cases before the design is constructed.
 
 ```{r survey-design}
 # Set option for handling strata with single PSUs
@@ -162,7 +171,7 @@ for (i in seq_along(survey_years)) {
           n_surveys = rep(length(years_to_pool), length(prop_names)),
           stringsAsFactors = FALSE
         )
-        
+
         pooled_results[[length(pooled_results) + 1]] <- props_df
       }
     }
@@ -231,13 +240,13 @@ ggplot(results_df, aes(x = year, y = proportion, fill = ideology)) +
 # Show composition in most recent period
 recent_year <- max(results_df$year)
 
-recent_composition <- results_df %>%
-  filter(year == recent_year) %>%
-  select(party, ideology, proportion) %>%
+recent_composition <- results_df |>
+  filter(year == recent_year) |>
+  select(party, ideology, proportion) |>
   arrange(party, ideology)
 
 # Create a wide format table
-recent_wide <- recent_composition %>%
+recent_wide <- recent_composition |>
   pivot_wider(names_from = ideology, values_from = proportion, values_fill = 0)
 
 knitr::kable(
@@ -252,7 +261,7 @@ knitr::kable(
 ```{r polarization-metrics}
 # Calculate mean ideology position over time for each party
 # (treating ideology as ordinal: 1=Extremely Liberal to 7=Extremely Conservative)
-ideology_numeric <- results_df %>%
+ideology_numeric <- results_df |>
   mutate(
     ideology_num = case_when(
       ideology == "Extremely Liberal" ~ 1,
@@ -265,8 +274,8 @@ ideology_numeric <- results_df %>%
     )
   )
 
-mean_ideology <- ideology_numeric %>%
-  group_by(party, year) %>%
+mean_ideology <- ideology_numeric |>
+  group_by(party, year) |>
   summarise(
     mean_position = sum(ideology_num * proportion),
     .groups = "drop"
@@ -427,8 +436,8 @@ ggplot(overall_ideology_df, aes(x = year, y = proportion, color = ideology, fill
 
 ```{r overall-party-ungrouped, fig.width=12, fig.height=6}
 # First, create ungrouped party labels
-gss_subset_party <- gss_all %>%
-  select(year, partyid, polviews, vpsu, vstrat, wtssps) %>%
+gss_subset_party <- gss_all |>
+  select(year, partyid, polviews, vpsu, vstrat, wtssps) |>
   filter(
     !is.na(partyid),
     !is.na(polviews),
@@ -436,7 +445,7 @@ gss_subset_party <- gss_all %>%
     year >= min_year,
     partyid <= 6,  # Exclude "Other party" (value 7)
     polviews <= 7  # Valid political views
-  ) %>%
+  ) |>
   mutate(
     party_ungrouped = case_when(
       partyid == 0 ~ "Strong Democrat",
@@ -452,7 +461,7 @@ gss_subset_party <- gss_all %>%
     vstrat = as.numeric(vstrat),
     wtssps = as.numeric(wtssps),
     stratvar = interaction(year, vstrat, drop = TRUE)
-  ) %>%
+  ) |>
   filter(!is.na(party_ungrouped))
 
 # Create survey design for ungrouped party analysis
