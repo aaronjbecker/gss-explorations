@@ -18,6 +18,9 @@ My preferred language is unquestionably Python, but my curiosity about the GSS d
 
 I haven't used R extensively in more than a decade, so I'm leaning on Claude while I come up to speed.
 
+## note on survey design weighting
+[This document from IPUMS](https://international.ipums.org/international/resources/misc_docs/user_note_variance.pdf) provides a good overview of how survey design can influence measurements derived from survey data, and explains some common methods for adjusting estimates to account for survey design. Worth a read.
+
 ## notes on tools
 This is more for my information, a collection of notes regarding R usage in VSCode/Cursor.
 

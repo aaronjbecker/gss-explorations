@@ -326,10 +326,287 @@ cat("\nOverall proportions by ideology (all years, survey-weighted):\n")
 print(summary_df, digits = 3)
 ```
 
+## Analysis by Party Identification
+
+For comparison, we also analyze financial situation change by party identification (Democrat/Independent/Republican) rather than self-reported ideology.
+
+### Prepare party identification data
+
+```{r prepare-party-data}
+# Select relevant variables and filter for party identification
+gss_party_subset <- gss_all |>
+  select(year, partyid, finalter, vpsu, vstrat, wtssps) |>
+  filter(
+    !is.na(partyid),
+    partyid <= 6,       # Exclude "Other party" (value 7)
+    !is.na(finalter),
+    finalter <= 3,      # valid finalter responses (1=better, 2=worse, 3=stayed same)
+    !is.na(wtssps),
+    year >= min_year
+  ) |>
+  mutate(
+    party_grouped = case_when(
+      partyid %in% 0:2 ~ "Democrat",
+      partyid == 3 ~ "Independent",
+      partyid %in% 4:6 ~ "Republican",
+      TRUE ~ NA_character_
+    ),
+    finalter_label = case_when(
+      finalter == 1 ~ "Better",
+      finalter == 2 ~ "Worse",
+      finalter == 3 ~ "Stayed Same",
+      TRUE ~ NA_character_
+    ),
+    vpsu = as.numeric(vpsu),
+    vstrat = as.numeric(vstrat),
+    wtssps = as.numeric(wtssps),
+    # Create year-specific strata to avoid collisions when pooling
+    stratvar = interaction(year, vstrat, drop = TRUE)
+  ) |>
+  filter(!is.na(party_grouped), !is.na(finalter_label))
+
+gss_party_subset$party_grouped <- factor(
+  gss_party_subset$party_grouped,
+  levels = c("Democrat", "Independent", "Republican")
+)
+
+gss_party_subset$finalter_label <- factor(
+  gss_party_subset$finalter_label,
+  levels = c("Better", "Stayed Same", "Worse")
+)
+
+# Verify data availability
+cat("Total observations:", nrow(gss_party_subset), "\n")
+cat("Year range:", min(gss_party_subset$year), "to", max(gss_party_subset$year), "\n")
+cat("\nObservations by party identification:\n")
+table(gss_party_subset$party_grouped) |> print()
+cat("\nObservations by financial situation:\n")
+table(gss_party_subset$finalter_label) |> print()
+```
+
+### Create survey design for party data
+
+```{r party-survey-design}
+gss_party_design <- svydesign(
+  ids = ~vpsu,
+  strata = ~stratvar,
+  weights = ~wtssps,
+  data = gss_party_subset,
+  nest = TRUE
+)
+```
+
+### Compute proportions by party identification with pooled surveys
+
+```{r compute-party-pooled}
+# Unique survey years and pooling radius
+party_survey_years <- sort(unique(gss_party_subset$year))
+party_pool_radius <- floor(pool_surveys / 2)
+
+cat("Survey years available:", paste(party_survey_years, collapse = ", "), "\n")
+cat("Total number of surveys:", length(party_survey_years), "\n\n")
+
+# Containers
+party_pooled_results <- list()
+
+party_groups <- levels(gss_party_subset$party_grouped)
+
+for (i in seq_along(party_survey_years)) {
+  target_year <- party_survey_years[i]
+
+  # Determine which survey indices to pool
+  start_idx <- max(1, i - party_pool_radius)
+  end_idx <- min(length(party_survey_years), i + party_pool_radius)
+  years_to_pool <- party_survey_years[start_idx:end_idx]
+
+  pooled_data_indices <- which(gss_party_subset$year %in% years_to_pool)
+
+  if (length(pooled_data_indices) > 0) {
+    pooled_design <- gss_party_design[pooled_data_indices, ]
+
+    for (party in party_groups) {
+      party_indices <- which(gss_party_subset$party_grouped[pooled_data_indices] == party)
+
+      if (length(party_indices) > 0) {
+        party_design <- pooled_design[party_indices, ]
+
+        # Distribution across all finalter categories
+        finalter_props <- svymean(
+          ~finalter_label,
+          design = party_design,
+          na.rm = TRUE
+        )
+
+        prop_values <- as.numeric(finalter_props)
+        prop_names <- gsub("finalter_label", "", names(finalter_props))
+        se_values <- as.numeric(SE(finalter_props))
+
+        props_df <- data.frame(
+          year = rep(target_year, length(prop_names)),
+          party = rep(party, length(prop_names)),
+          financial_status = prop_names,
+          proportion = prop_values,
+          se = se_values,
+          ci_lower = prop_values - 1.96 * se_values,
+          ci_upper = prop_values + 1.96 * se_values,
+          n_surveys = rep(length(years_to_pool), length(prop_names)),
+          stringsAsFactors = FALSE
+        )
+
+        party_pooled_results[[length(party_pooled_results) + 1]] <- props_df
+      }
+    }
+  }
+}
+
+# Combine results
+party_results_df <- do.call(rbind, party_pooled_results)
+
+party_results_df$financial_status <- factor(
+  party_results_df$financial_status,
+  levels = c("Better", "Stayed Same", "Worse")
+)
+
+party_results_df$party <- factor(
+  party_results_df$party,
+  levels = c("Democrat", "Independent", "Republican")
+)
+
+cat("Pooled estimates complete\n")
+head(party_results_df, 15)
+```
+
+### Plot: Financial situation change by party identification
+
+```{r party-financial-plot, fig.width=12, fig.height=11}
+party_colors <- c(
+  "Democrat" = "#2166AC",
+  "Independent" = "#762A83",
+  "Republican" = "#B2182B"
+)
+
+# Create more descriptive labels for facets
+party_results_df$outcome_label <- case_when(
+  party_results_df$financial_status == "Better" ~ "Financial Situation Improved",
+  party_results_df$financial_status == "Stayed Same" ~ "Financial Situation Stayed the Same",
+  party_results_df$financial_status == "Worse" ~ "Financial Situation Worsened"
+)
+
+party_results_df$outcome_label <- factor(
+  party_results_df$outcome_label,
+  levels = c("Financial Situation Improved",
+             "Financial Situation Stayed the Same",
+             "Financial Situation Worsened")
+)
+
+ggplot(party_results_df, aes(x = year, y = proportion, color = party, fill = party)) +
+  geom_ribbon(aes(ymin = ci_lower, ymax = ci_upper), alpha = 0.18, color = NA) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 1.3) +
+  facet_wrap(~outcome_label, ncol = 1, scales = "free_y") +
+  scale_color_manual(values = party_colors, name = "Party Identification") +
+  scale_fill_manual(values = party_colors, name = "Party Identification") +
+  scale_y_continuous(labels = scales::percent_format()) +
+  labs(
+    title = "Perceived Financial Situation Change by Party Identification",
+    subtitle = paste0(
+      "General Social Survey (pooling ", pool_surveys, " surveys)\n",
+      "Question: 'During the last few years, has your financial situation been getting better, worse, or stayed the same?'\n",
+      "Lines show survey-weighted proportions; ribbons are 95% confidence intervals"
+    ),
+    x = "Year",
+    y = "Proportion of respondents",
+    caption = "Data source: General Social Survey (GSS)"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "bottom",
+    plot.title = element_text(size = 14, face = "bold"),
+    strip.text = element_text(size = 12, face = "bold"),
+    axis.title = element_text(size = 11),
+    plot.caption = element_text(size = 9, hjust = 0)
+  )
+```
+
+### Stacked area chart by party identification
+
+```{r party-stacked-area, fig.width=12, fig.height=6}
+# Stacked area chart
+financial_colors <- c(
+  "Better" = "#2ca02c",
+  "Stayed Same" = "#ff7f0e",
+  "Worse" = "#d62728"
+)
+
+ggplot(party_results_df, aes(x = year, y = proportion, fill = financial_status)) +
+  geom_area(position = "stack", alpha = 0.8) +
+  facet_wrap(~party, ncol = 3) +
+  scale_fill_manual(values = financial_colors, name = "Financial Situation") +
+  scale_y_continuous(labels = scales::percent_format()) +
+  labs(
+    title = "Full Distribution of Financial Situation Perceptions by Party ID",
+    subtitle = paste0(
+      "General Social Survey (pooling ", pool_surveys, " surveys)\n",
+      "Stacked areas show proportion in each category within party identification group"
+    ),
+    x = "Year",
+    y = "Proportion",
+    caption = "Data source: General Social Survey (GSS)"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "bottom",
+    plot.title = element_text(size = 14, face = "bold"),
+    strip.text = element_text(size = 11, face = "bold"),
+    axis.title = element_text(size = 11),
+    plot.caption = element_text(size = 9, hjust = 0)
+  )
+```
+
+### Summary statistics by party identification
+
+```{r party-summary-stats}
+# Compute overall proportions by party ID across all years
+party_overall_design <- gss_party_design
+
+party_summary_by_group <- list()
+
+for (party in party_groups) {
+  party_indices <- which(gss_party_subset$party_grouped == party)
+
+  if (length(party_indices) > 0) {
+    party_design <- party_overall_design[party_indices, ]
+
+    finalter_props <- svymean(~finalter_label, design = party_design, na.rm = TRUE)
+
+    prop_values <- as.numeric(finalter_props)
+    prop_names <- gsub("finalter_label", "", names(finalter_props))
+    se_values <- as.numeric(SE(finalter_props))
+
+    props_df <- data.frame(
+      party = party,
+      financial_status = prop_names,
+      proportion = prop_values,
+      se = se_values,
+      stringsAsFactors = FALSE
+    )
+
+    party_summary_by_group[[length(party_summary_by_group) + 1]] <- props_df
+  }
+}
+
+party_summary_df <- do.call(rbind, party_summary_by_group)
+
+cat("\nOverall proportions by party ID (all years, survey-weighted):\n")
+print(party_summary_df, digits = 3)
+```
+
 ## Notes
 
 - Uses the same rolling pooled estimation and survey design handling as the regional ideology analysis (`stratvar` interaction, `nest = TRUE`, `survey.lonely.psu = "adjust"`).
 - Ideology grouping follows the three-category system: Liberal (1-3), Moderate (4), Conservative (5-7).
+- Party identification grouping: Democrat (0-2), Independent (3), Republican (4-6); excludes "Other party" (7).
 - The `finalter` variable asks about change in financial situation over "the last few years."
-- The main faceted line plot shows all three categories (improved, stayed same, worsened) with trends over time and 95% confidence intervals for each ideology group.
-- The stacked area chart provides an alternative view showing the full distribution within each ideology group.
+- The main faceted line plots show all three categories (improved, stayed same, worsened) with trends over time and 95% confidence intervals for each group.
+- The stacked area charts provide alternative views showing the full distribution within each group.
+- Comparison of ideology vs. party identification allows us to distinguish between ideological self-placement and partisan affiliation.
