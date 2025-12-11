@@ -1,0 +1,335 @@
+---
+title: "Financial Situation Change by Political Ideology Over Time"
+author: "Analysis"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+## Load packages
+
+```{r packages}
+library(gssr)
+library(survey)
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+```
+
+## Load GSS data (run once)
+
+```{r load-data, cache=TRUE}
+# Load the GSS cumulative data file
+data(gss_all)
+```
+
+## Parameters
+
+```{r parameters}
+# Design variables are available from 1975 onwards
+min_year <- 1975
+
+# Pooling window: how many surveys to pool together (centered)
+# e.g., 5 = current survey plus two before and two after
+pool_surveys <- 5
+```
+
+## Prepare and filter data
+
+```{r prepare-data}
+# Select relevant variables, filter, and create labels
+gss_subset <- gss_all |>
+  select(year, polviews, finalter, vpsu, vstrat, wtssps) |>
+  filter(
+    !is.na(polviews),
+    polviews <= 7,      # valid ideology responses
+    !is.na(finalter),
+    finalter <= 3,      # valid finalter responses (1=better, 2=worse, 3=stayed same)
+    !is.na(wtssps),
+    year >= min_year
+  ) |>
+  mutate(
+    ideology_label = case_when(
+      polviews == 1 ~ "Extremely Liberal",
+      polviews == 2 ~ "Liberal",
+      polviews == 3 ~ "Slightly Liberal",
+      polviews == 4 ~ "Moderate",
+      polviews == 5 ~ "Slightly Conservative",
+      polviews == 6 ~ "Conservative",
+      polviews == 7 ~ "Extremely Conservative",
+      TRUE ~ NA_character_
+    ),
+    polviews_grouped = case_when(
+      polviews %in% 1:3 ~ "Liberal",
+      polviews == 4 ~ "Moderate",
+      polviews %in% 5:7 ~ "Conservative",
+      TRUE ~ NA_character_
+    ),
+    finalter_label = case_when(
+      finalter == 1 ~ "Better",
+      finalter == 2 ~ "Worse",
+      finalter == 3 ~ "Stayed Same",
+      TRUE ~ NA_character_
+    ),
+    # Create binary indicators for better and worse
+    finalter_better = ifelse(finalter == 1, 1, 0),
+    finalter_worse = ifelse(finalter == 2, 1, 0),
+    polviews_num = as.numeric(polviews),
+    vpsu = as.numeric(vpsu),
+    vstrat = as.numeric(vstrat),
+    wtssps = as.numeric(wtssps),
+    # Create year-specific strata to avoid collisions when pooling
+    stratvar = interaction(year, vstrat, drop = TRUE)
+  ) |>
+  filter(!is.na(ideology_label), !is.na(finalter_label))
+
+gss_subset$polviews_grouped <- factor(
+  gss_subset$polviews_grouped,
+  levels = c("Liberal", "Moderate", "Conservative")
+)
+
+# Verify data availability
+cat("Total observations:", nrow(gss_subset), "\n")
+cat("Year range:", min(gss_subset$year), "to", max(gss_subset$year), "\n")
+cat("\nObservations by ideology group:\n")
+table(gss_subset$polviews_grouped) |> print()
+cat("\nObservations by financial situation:\n")
+table(gss_subset$finalter_label) |> print()
+```
+
+## Create survey design object
+
+Survey design handling follows the approach used in the regional analysis:
+- Build year-specific strata (`stratvar = interaction(year, vstrat)`) to keep strata unique when pooling across years.
+- Use `survey.lonely.psu = "adjust"` and `na.action = "na.pass"` to accommodate single-PSU strata created by pooling.
+
+```{r survey-design}
+options(survey.lonely.psu = "adjust")
+options(na.action = "na.pass")
+
+gss_design <- svydesign(
+  ids = ~vpsu,
+  strata = ~stratvar,
+  weights = ~wtssps,
+  data = gss_subset,
+  nest = TRUE
+)
+```
+
+## Compute proportions by ideology with pooled surveys
+
+```{r compute-pooled}
+# Unique survey years and pooling radius
+survey_years <- sort(unique(gss_subset$year))
+pool_radius <- floor(pool_surveys / 2)
+
+cat("Survey years available:", paste(survey_years, collapse = ", "), "\n")
+cat("Total number of surveys:", length(survey_years), "\n\n")
+
+# Containers
+pooled_results <- list()
+
+ideology_groups <- levels(gss_subset$polviews_grouped)
+
+for (i in seq_along(survey_years)) {
+  target_year <- survey_years[i]
+
+  # Determine which survey indices to pool
+  start_idx <- max(1, i - pool_radius)
+  end_idx <- min(length(survey_years), i + pool_radius)
+  years_to_pool <- survey_years[start_idx:end_idx]
+
+  pooled_data_indices <- which(gss_subset$year %in% years_to_pool)
+
+  if (length(pooled_data_indices) > 0) {
+    pooled_design <- gss_design[pooled_data_indices, ]
+
+    for (ideol in ideology_groups) {
+      ideology_indices <- which(gss_subset$polviews_grouped[pooled_data_indices] == ideol)
+
+      if (length(ideology_indices) > 0) {
+        ideology_design <- pooled_design[ideology_indices, ]
+
+        # Distribution across all finalter categories
+        finalter_props <- svymean(
+          ~finalter_label,
+          design = ideology_design,
+          na.rm = TRUE
+        )
+
+        prop_values <- as.numeric(finalter_props)
+        prop_names <- gsub("finalter_label", "", names(finalter_props))
+        se_values <- as.numeric(SE(finalter_props))
+
+        props_df <- data.frame(
+          year = rep(target_year, length(prop_names)),
+          ideology = rep(ideol, length(prop_names)),
+          financial_status = prop_names,
+          proportion = prop_values,
+          se = se_values,
+          ci_lower = prop_values - 1.96 * se_values,
+          ci_upper = prop_values + 1.96 * se_values,
+          n_surveys = rep(length(years_to_pool), length(prop_names)),
+          stringsAsFactors = FALSE
+        )
+
+        pooled_results[[length(pooled_results) + 1]] <- props_df
+      }
+    }
+  }
+}
+
+# Combine results
+results_df <- do.call(rbind, pooled_results)
+
+results_df$financial_status <- factor(
+  results_df$financial_status,
+  levels = c("Better", "Stayed Same", "Worse")
+)
+
+results_df$ideology <- factor(
+  results_df$ideology,
+  levels = c("Liberal", "Moderate", "Conservative")
+)
+
+cat("Pooled estimates complete\n")
+head(results_df, 15)
+```
+
+## Plot: Financial situation change by ideology over time
+
+```{r financial-plot, fig.width=12, fig.height=11}
+ideology_colors <- c(
+  "Liberal" = "#1f77b4",
+  "Moderate" = "#7f7f7f",
+  "Conservative" = "#b2182b"
+)
+
+# Create more descriptive labels for facets
+results_df$outcome_label <- case_when(
+  results_df$financial_status == "Better" ~ "Financial Situation Improved",
+  results_df$financial_status == "Stayed Same" ~ "Financial Situation Stayed the Same",
+  results_df$financial_status == "Worse" ~ "Financial Situation Worsened"
+)
+
+results_df$outcome_label <- factor(
+  results_df$outcome_label,
+  levels = c("Financial Situation Improved",
+             "Financial Situation Stayed the Same",
+             "Financial Situation Worsened")
+)
+
+ggplot(results_df, aes(x = year, y = proportion, color = ideology, fill = ideology)) +
+  geom_ribbon(aes(ymin = ci_lower, ymax = ci_upper), alpha = 0.18, color = NA) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 1.3) +
+  facet_wrap(~outcome_label, ncol = 1, scales = "free_y") +
+  scale_color_manual(values = ideology_colors, name = "Political Ideology") +
+  scale_fill_manual(values = ideology_colors, name = "Political Ideology") +
+  scale_y_continuous(labels = scales::percent_format()) +
+  labs(
+    title = "Perceived Financial Situation Change by Political Ideology",
+    subtitle = paste0(
+      "General Social Survey (pooling ", pool_surveys, " surveys)\n",
+      "Question: 'During the last few years, has your financial situation been getting better, worse, or stayed the same?'\n",
+      "Lines show survey-weighted proportions; ribbons are 95% confidence intervals"
+    ),
+    x = "Year",
+    y = "Proportion of respondents",
+    caption = "Data source: General Social Survey (GSS)"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "bottom",
+    plot.title = element_text(size = 14, face = "bold"),
+    strip.text = element_text(size = 12, face = "bold"),
+    axis.title = element_text(size = 11),
+    plot.caption = element_text(size = 9, hjust = 0)
+  )
+```
+
+## Stacked area chart alternative view
+
+For an alternative view showing the full distribution as stacked areas:
+
+```{r stacked-area, fig.width=12, fig.height=6}
+# Stacked area chart
+financial_colors <- c(
+  "Better" = "#2ca02c",
+  "Stayed Same" = "#ff7f0e",
+  "Worse" = "#d62728"
+)
+
+ggplot(results_df, aes(x = year, y = proportion, fill = financial_status)) +
+  geom_area(position = "stack", alpha = 0.8) +
+  facet_wrap(~ideology, ncol = 3) +
+  scale_fill_manual(values = financial_colors, name = "Financial Situation") +
+  scale_y_continuous(labels = scales::percent_format()) +
+  labs(
+    title = "Full Distribution of Financial Situation Perceptions by Ideology",
+    subtitle = paste0(
+      "General Social Survey (pooling ", pool_surveys, " surveys)\n",
+      "Stacked areas show proportion in each category within ideology group"
+    ),
+    x = "Year",
+    y = "Proportion",
+    caption = "Data source: General Social Survey (GSS)"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "bottom",
+    plot.title = element_text(size = 14, face = "bold"),
+    strip.text = element_text(size = 11, face = "bold"),
+    axis.title = element_text(size = 11),
+    plot.caption = element_text(size = 9, hjust = 0)
+  )
+```
+
+## Summary statistics by ideology (all years pooled)
+
+```{r summary-stats}
+# Compute overall proportions by ideology across all years
+overall_design <- gss_design
+
+summary_by_ideology <- list()
+
+for (ideol in ideology_groups) {
+  ideology_indices <- which(gss_subset$polviews_grouped == ideol)
+
+  if (length(ideology_indices) > 0) {
+    ideology_design <- overall_design[ideology_indices, ]
+
+    finalter_props <- svymean(~finalter_label, design = ideology_design, na.rm = TRUE)
+
+    prop_values <- as.numeric(finalter_props)
+    prop_names <- gsub("finalter_label", "", names(finalter_props))
+    se_values <- as.numeric(SE(finalter_props))
+
+    props_df <- data.frame(
+      ideology = ideol,
+      financial_status = prop_names,
+      proportion = prop_values,
+      se = se_values,
+      stringsAsFactors = FALSE
+    )
+
+    summary_by_ideology[[length(summary_by_ideology) + 1]] <- props_df
+  }
+}
+
+summary_df <- do.call(rbind, summary_by_ideology)
+
+cat("\nOverall proportions by ideology (all years, survey-weighted):\n")
+print(summary_df, digits = 3)
+```
+
+## Notes
+
+- Uses the same rolling pooled estimation and survey design handling as the regional ideology analysis (`stratvar` interaction, `nest = TRUE`, `survey.lonely.psu = "adjust"`).
+- Ideology grouping follows the three-category system: Liberal (1-3), Moderate (4), Conservative (5-7).
+- The `finalter` variable asks about change in financial situation over "the last few years."
+- The main faceted line plot shows all three categories (improved, stayed same, worsened) with trends over time and 95% confidence intervals for each ideology group.
+- The stacked area chart provides an alternative view showing the full distribution within each ideology group.

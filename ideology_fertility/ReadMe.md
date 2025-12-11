@@ -28,3 +28,30 @@ JBM cites this blog post in his FT article: https://ifstudies.org/blog/the-conse
 
 The Institute for Family Studies blog post references this X post that plots a correlation between state-level political affiliation and fertility rate, from 2018: https://x.com/fuxianyi/status/1325550119677173760?s=20
 
+## variables to look at
+* `childs`: Number of children
+* `finalter`: During the last few years, has your financial situation been getting better, worse, or has it stayed the same?
+* `parsol`: Compared to your parents when they were the age you are now, do you think your own standard of living now
+is much better, somewhat better, about the same, somewhat worse, or much worse than theirs was?
+* `conbus`: (I am going to name some institutions in this country. As far as the people running these institutions are
+concerned, would you say you have a great deal of confidence, only some confidence, or hardly any
+confidence at all in them?) Major companies
+* `conlegis`: (I am going to name some institutions in this country. As far as the people running these institutions are
+concerned, would you say you have a great deal of confidence, only some confidence, or hardly any
+confidence at all in them?) Congress
+* `conmedic`: (I am going to name some institutions in this country. As far as the people running these institutions are
+concerned, would you say you have a great deal of confidence, only some confidence, or hardly any
+confidence at all in them?) Medicine
+* `sexeduc`: Would you be for or against sex education in the public schools?
+* `spanking`: Do you strongly agree, agree, disagree, or strongly disagree that it is sometimes necessary to discipline a child
+with a good, hard spanking?
+* `fear`: Is there any area right around here--that is, within a mile--where you would be afraid to walk alone at night?
+* `relpersn`: To what extent do you consider yourself a religious person? Are you very religious, moderately religious,
+slightly religious, or not religious at all?
+* `sprtprsn`: To what extent do you consider yourself a spiritual person? Are you very spiritual, moderately spiritual,
+slightly spiritual, or not spiritual at all?
+* `notsmart`: (In your day-to-day life how often have any of the following things happened to you?) People act as if they
+think you are not smart.
+* `goodlife`: The way things are in America, people like me and my family have a good chance of improving our standard
+of living -- do you agree or disagree?
+* `meovrwrk`: Family life often suffers because men concentrate too much on their work.

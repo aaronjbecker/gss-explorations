@@ -1,0 +1,406 @@
+---
+title: "Political Ideology by Census Region Over Time"
+author: "Your Name"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+## Load packages
+
+```{r packages}
+library(gssr)
+library(survey)
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+```
+
+## Load GSS data (run once)
+
+```{r load-data, cache=TRUE}
+# Load the GSS cumulative data file
+data(gss_all)
+```
+
+## Parameters
+
+```{r parameters}
+# Design variables are available from 1975 onwards
+min_year <- 1975
+
+# Pooling window: how many surveys to pool together (centered)
+# e.g., 5 = current survey plus two before and two after
+pool_surveys <- 5
+```
+
+## Prepare and filter data
+
+```{r prepare-data}
+# Select relevant variables, filter, and create labels
+gss_subset <- gss_all |>
+  select(year, polviews, region, vpsu, vstrat, wtssps) |>
+  filter(
+    !is.na(polviews),
+    polviews <= 7,      # valid ideology responses
+    !is.na(region),
+    !is.na(wtssps),
+    year >= min_year
+  ) |>
+  mutate(
+    ideology_label = case_when(
+      polviews == 1 ~ "Extremely Liberal",
+      polviews == 2 ~ "Liberal",
+      polviews == 3 ~ "Slightly Liberal",
+      polviews == 4 ~ "Moderate",
+      polviews == 5 ~ "Slightly Conservative",
+      polviews == 6 ~ "Conservative",
+      polviews == 7 ~ "Extremely Conservative",
+      TRUE ~ NA_character_
+    ),
+    # Census divisions
+    region_label = case_when(
+      region == 1 ~ "New England",
+      region == 2 ~ "Middle Atlantic",
+      region == 3 ~ "East North Central",
+      region == 4 ~ "West North Central",
+      region == 5 ~ "South Atlantic",
+      region == 6 ~ "East South Central",
+      region == 7 ~ "West South Central",
+      region == 8 ~ "Mountain",
+      region == 9 ~ "Pacific",
+      TRUE ~ NA_character_
+    ),
+    polviews_grouped = case_when(
+      polviews %in% 1:3 ~ "Liberal",
+      polviews == 4 ~ "Moderate",
+      polviews %in% 5:7 ~ "Conservative",
+      TRUE ~ NA_character_
+    ),
+    polviews_num = as.numeric(polviews),
+    vpsu = as.numeric(vpsu),
+    vstrat = as.numeric(vstrat),
+    wtssps = as.numeric(wtssps),
+    # Create year-specific strata to avoid collisions when pooling
+    stratvar = interaction(year, vstrat, drop = TRUE),
+    all_respondents = "All"
+  ) |>
+  filter(!is.na(ideology_label), !is.na(region_label))
+
+# Region ordering for consistent facets
+region_levels <- c(
+  "New England", "Middle Atlantic", "East North Central", "West North Central",
+  "South Atlantic", "East South Central", "West South Central", "Mountain", "Pacific"
+)
+
+division_states <- c(
+  "New England" = "ME, NH, VT, MA, RI, CT",
+  "Middle Atlantic" = "NY, NJ, PA",
+  "East North Central" = "WI, MI, IL, IN, OH",
+  "West North Central" = "ND, SD, NE, KS, MN, IA, MO",
+  "South Atlantic" = "DE, MD, DC, VA, WV, NC, SC, GA, FL",
+  "East South Central" = "KY, TN, MS, AL",
+  "West South Central" = "AR, LA, OK, TX",
+  "Mountain" = "MT, ID, WY, NV, UT, CO, AZ, NM",
+  "Pacific" = "WA, OR, CA, AK, HI"
+)
+
+gss_subset$region_label <- factor(gss_subset$region_label, levels = region_levels)
+gss_subset$polviews_grouped <- factor(
+  gss_subset$polviews_grouped,
+  levels = c("Liberal", "Moderate", "Conservative")
+)
+
+# Verify data availability
+cat("Total observations:", nrow(gss_subset), "\n")
+cat("Year range:", min(gss_subset$year), "to", max(gss_subset$year), "\n")
+cat("\nObservations by region:\n")
+table(gss_subset$region_label) |> print()
+```
+
+## Create survey design object
+
+Survey design handling follows the approach used in the party-level analysis:
+- Build year-specific strata (`stratvar = interaction(year, vstrat)`) to keep strata unique when pooling across years.
+- Use `survey.lonely.psu = "adjust"` and `na.action = "na.pass"` to accommodate single-PSU strata created by pooling.
+
+```{r survey-design}
+options(survey.lonely.psu = "adjust")
+options(na.action = "na.pass")
+
+gss_design <- svydesign(
+  ids = ~vpsu,
+  strata = ~stratvar,
+  weights = ~wtssps,
+  data = gss_subset,
+  nest = TRUE
+)
+```
+
+## Compute ideology distributions and mean scores by region with pooled surveys
+
+```{r compute-pooled}
+# Unique survey years and pooling radius
+survey_years <- sort(unique(gss_subset$year))
+pool_radius <- floor(pool_surveys / 2)
+
+cat("Survey years available:", paste(survey_years, collapse = ", "), "\n")
+cat("Total number of surveys:", length(survey_years), "\n\n")
+
+# Containers
+pooled_results <- list()
+mean_results <- list()
+
+regions <- levels(gss_subset$region_label)
+
+for (i in seq_along(survey_years)) {
+  target_year <- survey_years[i]
+  
+  # Determine which survey indices to pool
+  start_idx <- max(1, i - pool_radius)
+  end_idx <- min(length(survey_years), i + pool_radius)
+  years_to_pool <- survey_years[start_idx:end_idx]
+  
+  pooled_data_indices <- which(gss_subset$year %in% years_to_pool)
+  
+  if (length(pooled_data_indices) > 0) {
+    pooled_design <- gss_design[pooled_data_indices, ]
+    
+    for (reg in regions) {
+      region_indices <- which(gss_subset$region_label[pooled_data_indices] == reg)
+      
+      if (length(region_indices) > 0) {
+        region_design <- pooled_design[region_indices, ]
+        
+        # Distribution across ideology categories
+        ideology_props <- svymean(
+          ~ideology_label,
+          design = region_design,
+          na.rm = TRUE
+        )
+        
+        prop_values <- as.numeric(ideology_props)
+        prop_names <- gsub("ideology_label", "", names(ideology_props))
+        
+        props_df <- data.frame(
+          year = rep(target_year, length(prop_names)),
+          region = rep(reg, length(prop_names)),
+          ideology = prop_names,
+          proportion = prop_values,
+          n_surveys = rep(length(years_to_pool), length(prop_names)),
+          stringsAsFactors = FALSE
+        )
+        
+        pooled_results[[length(pooled_results) + 1]] <- props_df
+        
+        # Survey-weighted mean ideology (numeric 1-7) with SE
+        ideology_mean <- svymean(~polviews_num, design = region_design, na.rm = TRUE)
+        mean_val <- as.numeric(ideology_mean)
+        se_val <- as.numeric(SE(ideology_mean))
+        
+        mean_df <- data.frame(
+          year = target_year,
+          region = reg,
+          mean_position = mean_val,
+          se = se_val,
+          ci_lower = mean_val - 1.96 * se_val,
+          ci_upper = mean_val + 1.96 * se_val,
+          n_surveys = length(years_to_pool),
+          stringsAsFactors = FALSE
+        )
+        
+        mean_results[[length(mean_results) + 1]] <- mean_df
+      }
+    }
+  }
+}
+
+# Combine results
+results_df <- do.call(rbind, pooled_results)
+mean_df <- do.call(rbind, mean_results)
+
+# Order ideology levels
+results_df$ideology <- factor(
+  results_df$ideology,
+  levels = c(
+    "Extremely Liberal", "Liberal", "Slightly Liberal", "Moderate",
+    "Slightly Conservative", "Conservative", "Extremely Conservative"
+  )
+)
+
+cat("Pooled estimates complete\n")
+head(results_df, 10)
+head(mean_df, 10)
+```
+
+## Trellis stacked area plots by region
+
+```{r stacked-area, fig.width=12, fig.height=10}
+ideology_colors <- c(
+  "Extremely Liberal" = "#053061",
+  "Liberal" = "#2166AC",
+  "Slightly Liberal" = "#4393C3",
+  "Moderate" = "#762A83",
+  "Slightly Conservative" = "#D6604D",
+  "Conservative" = "#B2182B",
+  "Extremely Conservative" = "#67001F"
+)
+
+ggplot(results_df, aes(x = year, y = proportion, fill = ideology)) +
+  geom_area(position = "stack", alpha = 0.8) +
+  facet_wrap(~region, ncol = 3) +
+  scale_fill_manual(values = ideology_colors, name = "Political Ideology") +
+  scale_y_continuous(labels = scales::percent_format()) +
+  labs(
+    title = "Ideological Composition by Census Region Over Time",
+    subtitle = paste0(
+      "General Social Survey (pooling ", pool_surveys, " surveys)\n",
+      "Stacked areas show proportion of each ideology within region"
+    ),
+    x = "Year",
+    y = "Proportion"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "right",
+    plot.title = element_text(size = 14, face = "bold"),
+    strip.text = element_text(size = 11, face = "bold"),
+    axis.title = element_text(size = 11)
+  )
+```
+
+## Mean ideology score by region with 95% CIs
+
+```{r mean-ideology, fig.width=12, fig.height=8}
+ggplot(mean_df, aes(x = year, y = mean_position, color = region, fill = region)) +
+  geom_ribbon(aes(ymin = ci_lower, ymax = ci_upper), alpha = 0.15, color = NA) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 1.5) +
+  scale_color_brewer(palette = "Set1", name = "Region") +
+  scale_fill_brewer(palette = "Set1", name = "Region") +
+  scale_y_continuous(
+    breaks = 1:7,
+    labels = c(
+      "Extremely\nLiberal", "Liberal", "Slightly\nLiberal", "Moderate",
+      "Slightly\nConservative", "Conservative", "Extremely\nConservative"
+    )
+  ) +
+  labs(
+    title = "Mean Ideological Position by Region",
+    subtitle = paste0(
+      "General Social Survey (pooling ", pool_surveys, " surveys)\n",
+      "Lines show survey-weighted means; ribbons are 95% confidence intervals"
+    ),
+    x = "Year",
+    y = "Mean Ideology (1 = Extremely Liberal, 7 = Extremely Conservative)"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "bottom",
+    plot.title = element_text(size = 14, face = "bold"),
+    axis.text.y = element_text(size = 8)
+  )
+```
+
+## Grouped ideology (Liberal / Moderate / Conservative) by region with 95% CIs
+
+```{r grouped-ideology, fig.width=12, fig.height=10}
+# Reuse survey_years, pool_radius, regions, and gss_design from above
+grouped_results <- list()
+
+for (i in seq_along(survey_years)) {
+  target_year <- survey_years[i]
+  
+  start_idx <- max(1, i - pool_radius)
+  end_idx <- min(length(survey_years), i + pool_radius)
+  years_to_pool <- survey_years[start_idx:end_idx]
+  
+  pooled_data_indices <- which(gss_subset$year %in% years_to_pool)
+  
+  if (length(pooled_data_indices) > 0) {
+    pooled_design <- gss_design[pooled_data_indices, ]
+    
+    for (reg in regions) {
+      region_indices <- which(gss_subset$region_label[pooled_data_indices] == reg)
+      
+      if (length(region_indices) > 0) {
+        region_design <- pooled_design[region_indices, ]
+        
+        grouped_mean <- svymean(~polviews_grouped, design = region_design, na.rm = TRUE)
+        prop_values <- as.numeric(grouped_mean)
+        prop_names <- gsub("polviews_grouped", "", names(grouped_mean))
+        se_values <- as.numeric(SE(grouped_mean))
+        
+        props_df <- data.frame(
+          year = rep(target_year, length(prop_names)),
+          region = rep(reg, length(prop_names)),
+          ideology_group = prop_names,
+          proportion = prop_values,
+          se = se_values,
+          ci_lower = prop_values - 1.96 * se_values,
+          ci_upper = prop_values + 1.96 * se_values,
+          n_surveys = rep(length(years_to_pool), length(prop_names)),
+          stringsAsFactors = FALSE
+        )
+        
+        grouped_results[[length(grouped_results) + 1]] <- props_df
+      }
+    }
+  }
+}
+
+grouped_df <- do.call(rbind, grouped_results)
+grouped_df$ideology_group <- factor(
+  grouped_df$ideology_group,
+  levels = c("Liberal", "Moderate", "Conservative")
+)
+grouped_df$region <- factor(grouped_df$region, levels = region_levels)
+
+group_colors <- c(
+  "Liberal" = "#1f77b4",
+  "Moderate" = "#7f7f7f",
+  "Conservative" = "#b2182b"
+)
+
+region_labeller <- function(values) {
+  sapply(values, function(v) {
+    suffix <- division_states[[v]]
+    if (is.null(suffix)) v else paste0(v, "\n", suffix)
+  })
+}
+
+ggplot(grouped_df, aes(x = year, y = proportion, color = ideology_group, fill = ideology_group)) +
+  geom_ribbon(aes(ymin = ci_lower, ymax = ci_upper), alpha = 0.18, color = NA) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 1.3) +
+  facet_wrap(~region, ncol = 3, labeller = labeller(region = region_labeller)) +
+  scale_color_manual(values = group_colors, name = "Ideology group") +
+  scale_fill_manual(values = group_colors, name = "Ideology group") +
+  scale_y_continuous(labels = scales::percent_format()) +
+  labs(
+    title = "Grouped Ideology by Region Over Time",
+    subtitle = paste0(
+      "General Social Survey (pooling ", pool_surveys, " surveys)\n",
+      "Lines show survey-weighted proportions; ribbons are 95% confidence intervals"
+    ),
+    x = "Year",
+    y = "Proportion of population"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "bottom",
+    plot.title = element_text(size = 14, face = "bold"),
+    strip.text = element_text(size = 11, face = "bold"),
+    axis.title = element_text(size = 11)
+  )
+```
+
+## Notes
+
+- Uses the same rolling pooled estimation and survey design handling as the party-level analysis (`stratvar` interaction, `nest = TRUE`, `survey.lonely.psu = "adjust"`).
+- Region labels follow the Census divisions as used in other analyses.
+- Trellis stacked areas show ideology composition within each region; the line plot shows survey-weighted mean ideology with 95% CIs from the survey design.
+- Grouped ideology plot (Liberal/Moderate/Conservative) adds survey-weighted proportions with 95% CIs by region.
