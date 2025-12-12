@@ -255,6 +255,106 @@ ggplot(results_df, aes(x = year, y = proportion, color = ideology, fill = ideolo
   )
 ```
 
+## Unpooled Analysis: Year-over-Year Variation (Women Only)
+
+To demonstrate the value of pooling surveys, we compute unpooled estimates for women for each individual survey year. This shows the year-over-year noise that pooling helps smooth.
+
+```{r compute-women-unpooled}
+# Containers for unpooled results (women only)
+women_unpooled_results <- list()
+
+for (yr in women_survey_years) {
+  year_indices <- which(gss_women_subset$year == yr)
+
+  if (length(year_indices) > 0) {
+    year_design <- gss_women_design[year_indices, ]
+
+    for (ideol in women_ideology_groups) {
+      ideology_indices <- which(gss_women_subset$polviews_grouped[year_indices] == ideol)
+
+      if (length(ideology_indices) > 0) {
+        ideology_design <- year_design[ideology_indices, ]
+
+        # Distribution across fear responses
+        fear_props <- svymean(
+          ~fear_label,
+          design = ideology_design,
+          na.rm = TRUE
+        )
+
+        prop_values <- as.numeric(fear_props)
+        prop_names <- gsub("fear_label", "", names(fear_props))
+        se_values <- as.numeric(SE(fear_props))
+
+        props_df <- data.frame(
+          year = rep(yr, length(prop_names)),
+          ideology = rep(ideol, length(prop_names)),
+          fear_response = prop_names,
+          proportion = prop_values,
+          se = se_values,
+          ci_lower = prop_values - 1.96 * se_values,
+          ci_upper = prop_values + 1.96 * se_values,
+          stringsAsFactors = FALSE
+        )
+
+        women_unpooled_results[[length(women_unpooled_results) + 1]] <- props_df
+      }
+    }
+  }
+}
+
+# Combine results
+women_unpooled_df <- do.call(rbind, women_unpooled_results)
+
+women_unpooled_df$fear_response <- factor(
+  women_unpooled_df$fear_response,
+  levels = c("Yes", "No")
+)
+
+women_unpooled_df$ideology <- factor(
+  women_unpooled_df$ideology,
+  levels = c("Liberal", "Moderate", "Conservative")
+)
+
+cat("Unpooled estimates for women complete\n")
+head(women_unpooled_df, 15)
+```
+
+## Plot: Unpooled year-over-year variation for women (Afraid only)
+
+```{r women-unpooled-plot, fig.width=10, fig.height=6}
+# Filter for "Yes" responses only
+women_unpooled_afraid <- women_unpooled_df |>
+  filter(fear_response == "Yes")
+
+ggplot(women_unpooled_afraid, aes(x = year, y = proportion, color = ideology, fill = ideology)) +
+  geom_ribbon(aes(ymin = ci_lower, ymax = ci_upper), alpha = 0.18, color = NA) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 1.5, alpha = 0.7) +
+  scale_color_manual(values = ideology_colors, name = "Political Ideology") +
+  scale_fill_manual(values = ideology_colors, name = "Political Ideology") +
+  scale_y_continuous(labels = scales::percent_format()) +
+  labs(
+    title = "Women Afraid to Walk Alone at Night by Political Ideology (Unpooled), USA, 1975-2024",
+    subtitle = paste0(
+      "Question: 'Is there any area right around here–that is, within a mile–where you would be\n\tafraid to walk alone at night?' (Women responding 'Yes')\n",
+      "General Social Survey (no pooling - individual survey years).\n",
+      "Lines show survey-weighted proportions; ribbons are 95% confidence intervals."
+    ),
+    x = "Year",
+    y = "Proportion of women afraid to walk alone",
+    caption = c("Data source: NORC General Social Survey (GSS)", "aaronjbecker.com")
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "bottom",
+    plot.title = element_text(size = 18, face = "bold"),
+    plot.subtitle = element_text(size=14),
+    axis.title = element_text(size = 14),
+    plot.caption = element_text(size = c(9, 14), hjust = c(0, 1), face=c("italic", "plain"))
+  )
+```
+
 ## Summary statistics by ideology (all years pooled)
 
 ```{r summary-stats}
