@@ -17,6 +17,7 @@ library(survey)
 library(dplyr)
 library(ggplot2)
 library(tidyr)
+library(gssrdoc)
 ```
 
 ## Load GSS data (run once)

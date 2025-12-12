@@ -1,0 +1,1067 @@
+---
+title: "Fear of Walking Alone at Night by Political Ideology Over Time"
+author: "Aaron J Becker"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+## Load packages
+
+```{r packages}
+library(gssr)
+library(survey)
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+```
+
+## Load GSS data (run once)
+
+```{r load-data, cache=TRUE}
+# Load the GSS cumulative data file
+data(gss_all)
+```
+
+## Parameters
+
+```{r parameters}
+# Design variables are available from 1975 onwards
+min_year <- 1975
+
+# Pooling window: how many surveys to pool together (centered)
+# e.g., 5 = current survey plus two before and two after
+pool_surveys <- 5
+
+# Age threshold for women's age analysis
+age_threshold <- 35
+```
+
+## Prepare and filter data
+
+```{r prepare-data}
+# Select relevant variables, filter, and create labels
+gss_subset <- gss_all |>
+  select(year, polviews, fear, vpsu, vstrat, wtssps) |>
+  filter(
+    !is.na(polviews),
+    polviews <= 7,      # valid ideology responses
+    !is.na(fear),
+    fear <= 2,          # valid fear responses (1=yes, 2=no)
+    !is.na(wtssps),
+    year >= min_year
+  ) |>
+  mutate(
+    ideology_label = case_when(
+      polviews == 1 ~ "Extremely Liberal",
+      polviews == 2 ~ "Liberal",
+      polviews == 3 ~ "Slightly Liberal",
+      polviews == 4 ~ "Moderate",
+      polviews == 5 ~ "Slightly Conservative",
+      polviews == 6 ~ "Conservative",
+      polviews == 7 ~ "Extremely Conservative",
+      TRUE ~ NA_character_
+    ),
+    polviews_grouped = case_when(
+      polviews %in% 1:3 ~ "Liberal",
+      polviews == 4 ~ "Moderate",
+      polviews %in% 5:7 ~ "Conservative",
+      TRUE ~ NA_character_
+    ),
+    fear_label = case_when(
+      fear == 1 ~ "Yes",
+      fear == 2 ~ "No",
+      TRUE ~ NA_character_
+    ),
+    # Create binary indicator for afraid
+    fear_yes = ifelse(fear == 1, 1, 0),
+    polviews_num = as.numeric(polviews),
+    vpsu = as.numeric(vpsu),
+    vstrat = as.numeric(vstrat),
+    wtssps = as.numeric(wtssps),
+    # Create year-specific strata to avoid collisions when pooling
+    stratvar = interaction(year, vstrat, drop = TRUE)
+  ) |>
+  filter(!is.na(ideology_label), !is.na(fear_label))
+
+gss_subset$polviews_grouped <- factor(
+  gss_subset$polviews_grouped,
+  levels = c("Liberal", "Moderate", "Conservative")
+)
+
+gss_subset$fear_label <- factor(
+  gss_subset$fear_label,
+  levels = c("Yes", "No")
+)
+
+# Verify data availability
+cat("Total observations:", nrow(gss_subset), "\n")
+cat("Year range:", min(gss_subset$year), "to", max(gss_subset$year), "\n")
+cat("\nObservations by ideology group:\n")
+table(gss_subset$polviews_grouped) |> print()
+cat("\nObservations by fear response:\n")
+table(gss_subset$fear_label) |> print()
+```
+
+## Create survey design object
+
+Survey design handling follows the approach used in the regional analysis:
+- Build year-specific strata (`stratvar = interaction(year, vstrat)`) to keep strata unique when pooling across years.
+- Use `survey.lonely.psu = "adjust"` and `na.action = "na.pass"` to accommodate single-PSU strata created by pooling.
+
+```{r survey-design}
+options(survey.lonely.psu = "adjust")
+options(na.action = "na.pass")
+
+gss_design <- svydesign(
+  ids = ~vpsu,
+  strata = ~stratvar,
+  weights = ~wtssps,
+  data = gss_subset,
+  nest = TRUE
+)
+```
+
+## Compute proportions by ideology with pooled surveys
+
+```{r compute-pooled}
+# Unique survey years and pooling radius
+survey_years <- sort(unique(gss_subset$year))
+pool_radius <- floor(pool_surveys / 2)
+
+cat("Survey years available:", paste(survey_years, collapse = ", "), "\n")
+cat("Total number of surveys:", length(survey_years), "\n\n")
+
+# Containers
+pooled_results <- list()
+
+ideology_groups <- levels(gss_subset$polviews_grouped)
+
+for (i in seq_along(survey_years)) {
+  target_year <- survey_years[i]
+
+  # Determine which survey indices to pool
+  start_idx <- max(1, i - pool_radius)
+  end_idx <- min(length(survey_years), i + pool_radius)
+  years_to_pool <- survey_years[start_idx:end_idx]
+
+  pooled_data_indices <- which(gss_subset$year %in% years_to_pool)
+
+  if (length(pooled_data_indices) > 0) {
+    pooled_design <- gss_design[pooled_data_indices, ]
+
+    for (ideol in ideology_groups) {
+      ideology_indices <- which(gss_subset$polviews_grouped[pooled_data_indices] == ideol)
+
+      if (length(ideology_indices) > 0) {
+        ideology_design <- pooled_design[ideology_indices, ]
+
+        # Distribution across fear responses
+        fear_props <- svymean(
+          ~fear_label,
+          design = ideology_design,
+          na.rm = TRUE
+        )
+
+        prop_values <- as.numeric(fear_props)
+        prop_names <- gsub("fear_label", "", names(fear_props))
+        se_values <- as.numeric(SE(fear_props))
+
+        props_df <- data.frame(
+          year = rep(target_year, length(prop_names)),
+          ideology = rep(ideol, length(prop_names)),
+          fear_response = prop_names,
+          proportion = prop_values,
+          se = se_values,
+          ci_lower = prop_values - 1.96 * se_values,
+          ci_upper = prop_values + 1.96 * se_values,
+          n_surveys = rep(length(years_to_pool), length(prop_names)),
+          stringsAsFactors = FALSE
+        )
+
+        pooled_results[[length(pooled_results) + 1]] <- props_df
+      }
+    }
+  }
+}
+
+# Combine results
+results_df <- do.call(rbind, pooled_results)
+
+results_df$fear_response <- factor(
+  results_df$fear_response,
+  levels = c("Yes", "No")
+)
+
+results_df$ideology <- factor(
+  results_df$ideology,
+  levels = c("Liberal", "Moderate", "Conservative")
+)
+
+cat("Pooled estimates complete\n")
+head(results_df, 15)
+```
+
+## Plot: Fear of walking alone by ideology over time
+
+```{r fear-plot, fig.width=10, fig.height=8}
+ideology_colors <- c(
+  "Liberal" = "#1f77b4",
+  "Moderate" = "#7f7f7f",
+  "Conservative" = "#b2182b"
+)
+
+# Create more descriptive labels for facets
+results_df$outcome_label <- case_when(
+  results_df$fear_response == "Yes" ~ "Afraid to Walk Alone at Night",
+  results_df$fear_response == "No" ~ "Not Afraid to Walk Alone at Night"
+)
+
+results_df$outcome_label <- factor(
+  results_df$outcome_label,
+  levels = c("Afraid to Walk Alone at Night",
+             "Not Afraid to Walk Alone at Night")
+)
+
+ggplot(results_df, aes(x = year, y = proportion, color = ideology, fill = ideology)) +
+  geom_ribbon(aes(ymin = ci_lower, ymax = ci_upper), alpha = 0.18, color = NA) +
+  geom_line(linewidth = 1) +
+  facet_wrap(~outcome_label, ncol = 1, scales = "free_y") +
+  scale_color_manual(values = ideology_colors, name = "Political Ideology") +
+  scale_fill_manual(values = ideology_colors, name = "Political Ideology") +
+  scale_y_continuous(labels = scales::percent_format()) +
+  labs(
+    title = "Fear of Walking Alone at Night by Political Ideology, USA, 1975-2024",
+    subtitle = paste0(
+      "Question: 'Is there any area right around here–that is, within a mile–where you would be\n\tafraid to walk alone at night?'\n",
+      "General Social Survey (pooling ", pool_surveys, " surveys, centered).\n",
+      "Lines show survey-weighted proportions; ribbons are 95% confidence intervals."
+    ),
+    x = "Year",
+    y = "Proportion of respondents",
+    caption = c("Data source: NORC General Social Survey (GSS)", "aaronjbecker.com")
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "bottom",
+    plot.title = element_text(size = 18, face = "bold"),
+    plot.subtitle = element_text(size=14),
+    strip.text = element_text(size = 12, face = "bold"),
+    axis.title = element_text(size = 14),
+    plot.caption = element_text(size = c(9, 14), hjust = c(0, 1), face=c("italic", "plain"))
+  )
+```
+
+## Summary statistics by ideology (all years pooled)
+
+```{r summary-stats}
+# Compute overall proportions by ideology across all years
+overall_design <- gss_design
+
+summary_by_ideology <- list()
+
+for (ideol in ideology_groups) {
+  ideology_indices <- which(gss_subset$polviews_grouped == ideol)
+
+  if (length(ideology_indices) > 0) {
+    ideology_design <- overall_design[ideology_indices, ]
+
+    fear_props <- svymean(~fear_label, design = ideology_design, na.rm = TRUE)
+
+    prop_values <- as.numeric(fear_props)
+    prop_names <- gsub("fear_label", "", names(fear_props))
+    se_values <- as.numeric(SE(fear_props))
+
+    props_df <- data.frame(
+      ideology = ideol,
+      fear_response = prop_names,
+      proportion = prop_values,
+      se = se_values,
+      stringsAsFactors = FALSE
+    )
+
+    summary_by_ideology[[length(summary_by_ideology) + 1]] <- props_df
+  }
+}
+
+summary_df <- do.call(rbind, summary_by_ideology)
+
+cat("\nOverall proportions by ideology (all years, survey-weighted):\n")
+print(summary_df, digits = 3)
+```
+
+## Analysis by Gender: Women Only
+
+Given that fear of walking alone at night may differ significantly by gender, we repeat the ideology analysis restricting to female respondents only.
+
+### Prepare data for women
+
+```{r prepare-women-data}
+# Select relevant variables and filter for women only
+gss_women_subset <- gss_all |>
+  select(year, polviews, fear, sex, vpsu, vstrat, wtssps) |>
+  filter(
+    !is.na(sex),
+    sex == 2,           # 2 = Female
+    !is.na(polviews),
+    polviews <= 7,      # valid ideology responses
+    !is.na(fear),
+    fear <= 2,          # valid fear responses (1=yes, 2=no)
+    !is.na(wtssps),
+    year >= min_year
+  ) |>
+  mutate(
+    ideology_label = case_when(
+      polviews == 1 ~ "Extremely Liberal",
+      polviews == 2 ~ "Liberal",
+      polviews == 3 ~ "Slightly Liberal",
+      polviews == 4 ~ "Moderate",
+      polviews == 5 ~ "Slightly Conservative",
+      polviews == 6 ~ "Conservative",
+      polviews == 7 ~ "Extremely Conservative",
+      TRUE ~ NA_character_
+    ),
+    polviews_grouped = case_when(
+      polviews %in% 1:3 ~ "Liberal",
+      polviews == 4 ~ "Moderate",
+      polviews %in% 5:7 ~ "Conservative",
+      TRUE ~ NA_character_
+    ),
+    fear_label = case_when(
+      fear == 1 ~ "Yes",
+      fear == 2 ~ "No",
+      TRUE ~ NA_character_
+    ),
+    vpsu = as.numeric(vpsu),
+    vstrat = as.numeric(vstrat),
+    wtssps = as.numeric(wtssps),
+    # Create year-specific strata to avoid collisions when pooling
+    stratvar = interaction(year, vstrat, drop = TRUE)
+  ) |>
+  filter(!is.na(ideology_label), !is.na(fear_label))
+
+gss_women_subset$polviews_grouped <- factor(
+  gss_women_subset$polviews_grouped,
+  levels = c("Liberal", "Moderate", "Conservative")
+)
+
+gss_women_subset$fear_label <- factor(
+  gss_women_subset$fear_label,
+  levels = c("Yes", "No")
+)
+
+# Verify data availability
+cat("Total observations (women only):", nrow(gss_women_subset), "\n")
+cat("Year range:", min(gss_women_subset$year), "to", max(gss_women_subset$year), "\n")
+cat("\nObservations by ideology group:\n")
+table(gss_women_subset$polviews_grouped) |> print()
+cat("\nObservations by fear response:\n")
+table(gss_women_subset$fear_label) |> print()
+```
+
+### Create survey design for women
+
+```{r women-survey-design}
+gss_women_design <- svydesign(
+  ids = ~vpsu,
+  strata = ~stratvar,
+  weights = ~wtssps,
+  data = gss_women_subset,
+  nest = TRUE
+)
+```
+
+### Compute proportions by ideology for women with pooled surveys
+
+```{r compute-women-pooled}
+# Unique survey years and pooling radius
+women_survey_years <- sort(unique(gss_women_subset$year))
+women_pool_radius <- floor(pool_surveys / 2)
+
+cat("Survey years available:", paste(women_survey_years, collapse = ", "), "\n")
+cat("Total number of surveys:", length(women_survey_years), "\n\n")
+
+# Containers
+women_pooled_results <- list()
+
+women_ideology_groups <- levels(gss_women_subset$polviews_grouped)
+
+for (i in seq_along(women_survey_years)) {
+  target_year <- women_survey_years[i]
+
+  # Determine which survey indices to pool
+  start_idx <- max(1, i - women_pool_radius)
+  end_idx <- min(length(women_survey_years), i + women_pool_radius)
+  years_to_pool <- women_survey_years[start_idx:end_idx]
+
+  pooled_data_indices <- which(gss_women_subset$year %in% years_to_pool)
+
+  if (length(pooled_data_indices) > 0) {
+    pooled_design <- gss_women_design[pooled_data_indices, ]
+
+    for (ideol in women_ideology_groups) {
+      ideology_indices <- which(gss_women_subset$polviews_grouped[pooled_data_indices] == ideol)
+
+      if (length(ideology_indices) > 0) {
+        ideology_design <- pooled_design[ideology_indices, ]
+
+        # Distribution across fear responses
+        fear_props <- svymean(
+          ~fear_label,
+          design = ideology_design,
+          na.rm = TRUE
+        )
+
+        prop_values <- as.numeric(fear_props)
+        prop_names <- gsub("fear_label", "", names(fear_props))
+        se_values <- as.numeric(SE(fear_props))
+
+        props_df <- data.frame(
+          year = rep(target_year, length(prop_names)),
+          ideology = rep(ideol, length(prop_names)),
+          fear_response = prop_names,
+          proportion = prop_values,
+          se = se_values,
+          ci_lower = prop_values - 1.96 * se_values,
+          ci_upper = prop_values + 1.96 * se_values,
+          n_surveys = rep(length(years_to_pool), length(prop_names)),
+          stringsAsFactors = FALSE
+        )
+
+        women_pooled_results[[length(women_pooled_results) + 1]] <- props_df
+      }
+    }
+  }
+}
+
+# Combine results
+women_results_df <- do.call(rbind, women_pooled_results)
+
+women_results_df$fear_response <- factor(
+  women_results_df$fear_response,
+  levels = c("Yes", "No")
+)
+
+women_results_df$ideology <- factor(
+  women_results_df$ideology,
+  levels = c("Liberal", "Moderate", "Conservative")
+)
+
+cat("Pooled estimates complete\n")
+head(women_results_df, 15)
+```
+
+### Plot: Fear of walking alone by ideology for women
+
+```{r women-fear-plot, fig.width=10, fig.height=8}
+# Create more descriptive labels for facets
+women_results_df$outcome_label <- case_when(
+  women_results_df$fear_response == "Yes" ~ "Afraid to Walk Alone at Night",
+  women_results_df$fear_response == "No" ~ "Not Afraid to Walk Alone at Night"
+)
+
+women_results_df$outcome_label <- factor(
+  women_results_df$outcome_label,
+  levels = c("Afraid to Walk Alone at Night",
+             "Not Afraid to Walk Alone at Night")
+)
+
+ggplot(women_results_df, aes(x = year, y = proportion, color = ideology, fill = ideology)) +
+  geom_ribbon(aes(ymin = ci_lower, ymax = ci_upper), alpha = 0.18, color = NA) +
+  geom_line(linewidth = 1) +
+  facet_wrap(~outcome_label, ncol = 1, scales = "free_y") +
+  scale_color_manual(values = ideology_colors, name = "Political Ideology") +
+  scale_fill_manual(values = ideology_colors, name = "Political Ideology") +
+  scale_y_continuous(labels = scales::percent_format()) +
+  labs(
+    title = "Fear of Walking Alone at Night by Political Ideology (Women Only), USA, 1975-2024",
+    subtitle = paste0(
+      "Question: 'Is there any area right around here–that is, within a mile–where you would be\n\tafraid to walk alone at night?'\n",
+      "General Social Survey (pooling ", pool_surveys, " surveys, centered).\n",
+      "Lines show survey-weighted proportions; ribbons are 95% confidence intervals."
+    ),
+    x = "Year",
+    y = "Proportion of respondents",
+    caption = c("Data source: NORC General Social Survey (GSS)", "aaronjbecker.com")
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "bottom",
+    plot.title = element_text(size = 18, face = "bold"),
+    plot.subtitle = element_text(size=14),
+    strip.text = element_text(size = 12, face = "bold"),
+    axis.title = element_text(size = 14),
+    plot.caption = element_text(size = c(9, 14), hjust = c(0, 1), face=c("italic", "plain"))
+  )
+```
+
+### Summary statistics by ideology for women (all years pooled)
+
+```{r women-summary-stats}
+# Compute overall proportions by ideology across all years for women
+women_overall_design <- gss_women_design
+
+women_summary_by_ideology <- list()
+
+for (ideol in women_ideology_groups) {
+  ideology_indices <- which(gss_women_subset$polviews_grouped == ideol)
+
+  if (length(ideology_indices) > 0) {
+    ideology_design <- women_overall_design[ideology_indices, ]
+
+    fear_props <- svymean(~fear_label, design = ideology_design, na.rm = TRUE)
+
+    prop_values <- as.numeric(fear_props)
+    prop_names <- gsub("fear_label", "", names(fear_props))
+    se_values <- as.numeric(SE(fear_props))
+
+    props_df <- data.frame(
+      ideology = ideol,
+      fear_response = prop_names,
+      proportion = prop_values,
+      se = se_values,
+      stringsAsFactors = FALSE
+    )
+
+    women_summary_by_ideology[[length(women_summary_by_ideology) + 1]] <- props_df
+  }
+}
+
+women_summary_df <- do.call(rbind, women_summary_by_ideology)
+
+cat("\nOverall proportions by ideology for women (all years, survey-weighted):\n")
+print(women_summary_df, digits = 3)
+```
+
+## Analysis by Community Size: Women's Fear by Ideology and Urban/Suburban/Rural Location
+
+To examine whether fear patterns vary by community type, we analyze the proportion of women who are afraid to walk alone at night, stratified by political ideology and community size.
+
+### Prepare data for women by community size
+
+```{r prepare-women-community-data}
+# Select relevant variables and filter for women only, with community size
+gss_women_community <- gss_all |>
+  select(year, polviews, fear, sex, xnorcsiz, vpsu, vstrat, wtssps) |>
+  filter(
+    !is.na(sex),
+    sex == 2,           # 2 = Female
+    !is.na(polviews),
+    polviews <= 7,      # valid ideology responses
+    !is.na(fear),
+    fear == 1,          # Only analyzing "Yes" (afraid)
+    !is.na(xnorcsiz),
+    xnorcsiz <= 10,     # valid community size responses
+    !is.na(wtssps),
+    year >= min_year
+  ) |>
+  mutate(
+    polviews_grouped = case_when(
+      polviews %in% 1:3 ~ "Liberal",
+      polviews == 4 ~ "Moderate",
+      polviews %in% 5:7 ~ "Conservative",
+      TRUE ~ NA_character_
+    ),
+    # Group xnorcsiz into urban, suburban, rural
+    community_size = case_when(
+      xnorcsiz %in% 1:2 ~ "Urban",           # Large and medium central cities
+      xnorcsiz %in% 3:6 ~ "Suburban",        # Suburbs and unincorporated areas of cities
+      xnorcsiz %in% 7:10 ~ "Rural",          # Small cities, towns, villages, open country
+      TRUE ~ NA_character_
+    ),
+    vpsu = as.numeric(vpsu),
+    vstrat = as.numeric(vstrat),
+    wtssps = as.numeric(wtssps),
+    # Create year-specific strata to avoid collisions when pooling
+    stratvar = interaction(year, vstrat, drop = TRUE)
+  ) |>
+  filter(!is.na(polviews_grouped), !is.na(community_size))
+
+# For the denominator (all women who answered the fear question)
+gss_women_all_fear <- gss_all |>
+  select(year, polviews, fear, sex, xnorcsiz, vpsu, vstrat, wtssps) |>
+  filter(
+    !is.na(sex),
+    sex == 2,
+    !is.na(polviews),
+    polviews <= 7,
+    !is.na(fear),
+    fear <= 2,          # Both Yes and No responses
+    !is.na(xnorcsiz),
+    xnorcsiz <= 10,
+    !is.na(wtssps),
+    year >= min_year
+  ) |>
+  mutate(
+    polviews_grouped = case_when(
+      polviews %in% 1:3 ~ "Liberal",
+      polviews == 4 ~ "Moderate",
+      polviews %in% 5:7 ~ "Conservative",
+      TRUE ~ NA_character_
+    ),
+    community_size = case_when(
+      xnorcsiz %in% 1:2 ~ "Urban",
+      xnorcsiz %in% 3:6 ~ "Suburban",
+      xnorcsiz %in% 7:10 ~ "Rural",
+      TRUE ~ NA_character_
+    ),
+    fear_yes = ifelse(fear == 1, 1, 0),
+    vpsu = as.numeric(vpsu),
+    vstrat = as.numeric(vstrat),
+    wtssps = as.numeric(wtssps),
+    stratvar = interaction(year, vstrat, drop = TRUE)
+  ) |>
+  filter(!is.na(polviews_grouped), !is.na(community_size))
+
+gss_women_all_fear$polviews_grouped <- factor(
+  gss_women_all_fear$polviews_grouped,
+  levels = c("Liberal", "Moderate", "Conservative")
+)
+
+gss_women_all_fear$community_size <- factor(
+  gss_women_all_fear$community_size,
+  levels = c("Urban", "Suburban", "Rural")
+)
+
+# Verify data availability
+cat("Total observations (women with fear responses):", nrow(gss_women_all_fear), "\n")
+cat("Observations afraid (fear=yes):", nrow(gss_women_community), "\n")
+cat("Year range:", min(gss_women_all_fear$year), "to", max(gss_women_all_fear$year), "\n")
+cat("\nObservations by ideology group:\n")
+table(gss_women_all_fear$polviews_grouped) |> print()
+cat("\nObservations by community size:\n")
+table(gss_women_all_fear$community_size) |> print()
+cat("\nObservations by ideology and community size:\n")
+table(gss_women_all_fear$polviews_grouped, gss_women_all_fear$community_size) |> print()
+```
+
+### Create survey design for women by community analysis
+
+```{r women-community-survey-design}
+gss_women_comm_design <- svydesign(
+  ids = ~vpsu,
+  strata = ~stratvar,
+  weights = ~wtssps,
+  data = gss_women_all_fear,
+  nest = TRUE
+)
+```
+
+### Compute proportions of women afraid by ideology and community size
+
+```{r compute-women-community-pooled}
+# Unique survey years and pooling radius
+women_comm_years <- sort(unique(gss_women_all_fear$year))
+women_comm_radius <- floor(pool_surveys / 2)
+
+cat("Survey years available:", paste(women_comm_years, collapse = ", "), "\n")
+cat("Total number of surveys:", length(women_comm_years), "\n\n")
+
+# Containers
+women_comm_results <- list()
+
+ideology_groups_comm <- levels(gss_women_all_fear$polviews_grouped)
+community_groups <- levels(gss_women_all_fear$community_size)
+
+for (i in seq_along(women_comm_years)) {
+  target_year <- women_comm_years[i]
+
+  # Determine which survey indices to pool
+  start_idx <- max(1, i - women_comm_radius)
+  end_idx <- min(length(women_comm_years), i + women_comm_radius)
+  years_to_pool <- women_comm_years[start_idx:end_idx]
+
+  pooled_data_indices <- which(gss_women_all_fear$year %in% years_to_pool)
+
+  if (length(pooled_data_indices) > 0) {
+    pooled_design <- gss_women_comm_design[pooled_data_indices, ]
+
+    for (ideol in ideology_groups_comm) {
+      for (comm in community_groups) {
+        # Filter for this ideology-community combination
+        combo_indices <- which(
+          gss_women_all_fear$polviews_grouped[pooled_data_indices] == ideol &
+          gss_women_all_fear$community_size[pooled_data_indices] == comm
+        )
+
+        if (length(combo_indices) > 10) {  # Require minimum sample size
+          combo_design <- pooled_design[combo_indices, ]
+
+          # Proportion afraid (mean of binary fear_yes variable)
+          fear_mean <- svymean(
+            ~fear_yes,
+            design = combo_design,
+            na.rm = TRUE
+          )
+
+          prop_value <- as.numeric(fear_mean)
+          se_value <- as.numeric(SE(fear_mean))
+
+          props_df <- data.frame(
+            year = target_year,
+            ideology = ideol,
+            community_size = comm,
+            proportion_afraid = prop_value,
+            se = se_value,
+            ci_lower = prop_value - 1.96 * se_value,
+            ci_upper = prop_value + 1.96 * se_value,
+            n_surveys = length(years_to_pool),
+            stringsAsFactors = FALSE
+          )
+
+          women_comm_results[[length(women_comm_results) + 1]] <- props_df
+        }
+      }
+    }
+  }
+}
+
+# Combine results
+women_comm_df <- do.call(rbind, women_comm_results)
+
+women_comm_df$ideology <- factor(
+  women_comm_df$ideology,
+  levels = c("Liberal", "Moderate", "Conservative")
+)
+
+women_comm_df$community_size <- factor(
+  women_comm_df$community_size,
+  levels = c("Urban", "Suburban", "Rural")
+)
+
+cat("Pooled estimates complete\n")
+head(women_comm_df, 15)
+```
+
+### Plot: Women's fear by ideology and community size
+
+```{r women-community-plot, fig.width=12, fig.height=10}
+ggplot(women_comm_df, aes(x = year, y = proportion_afraid, color = ideology, fill = ideology)) +
+  geom_ribbon(aes(ymin = ci_lower, ymax = ci_upper), alpha = 0.18, color = NA) +
+  geom_line(linewidth = 1) +
+  facet_wrap(~community_size, ncol = 1, scales = "free_y") +
+  scale_color_manual(values = ideology_colors, name = "Political Ideology") +
+  scale_fill_manual(values = ideology_colors, name = "Political Ideology") +
+  scale_y_continuous(labels = scales::percent_format()) +
+  labs(
+    title = "Women Afraid to Walk Alone at Night by Political Ideology and Community Size, USA, 1975-2024",
+    subtitle = paste0(
+      "Question: 'Is there any area right around here–that is, within a mile–where you would be\n\tafraid to walk alone at night?' (Women responding 'Yes')\n",
+      "General Social Survey (pooling ", pool_surveys, " surveys, centered).\n",
+      "Lines show survey-weighted proportions; ribbons are 95% confidence intervals."
+    ),
+    x = "Year",
+    y = "Proportion of women afraid",
+    caption = c("Data source: NORC General Social Survey (GSS)", "aaronjbecker.com")
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "bottom",
+    plot.title = element_text(size = 18, face = "bold"),
+    plot.subtitle = element_text(size=14),
+    strip.text = element_text(size = 12, face = "bold"),
+    axis.title = element_text(size = 14),
+    plot.caption = element_text(size = c(9, 14), hjust = c(0, 1), face=c("italic", "plain"))
+  )
+```
+
+### Summary statistics: Women's fear by ideology and community size (all years)
+
+```{r women-community-summary}
+# Compute overall proportions across all years
+women_comm_overall <- gss_women_comm_design
+
+summary_women_comm <- list()
+
+for (ideol in ideology_groups_comm) {
+  for (comm in community_groups) {
+    combo_indices <- which(
+      gss_women_all_fear$polviews_grouped == ideol &
+      gss_women_all_fear$community_size == comm
+    )
+
+    if (length(combo_indices) > 0) {
+      combo_design <- women_comm_overall[combo_indices, ]
+
+      fear_mean <- svymean(~fear_yes, design = combo_design, na.rm = TRUE)
+
+      prop_value <- as.numeric(fear_mean)
+      se_value <- as.numeric(SE(fear_mean))
+
+      props_df <- data.frame(
+        ideology = ideol,
+        community_size = comm,
+        proportion_afraid = prop_value,
+        se = se_value,
+        stringsAsFactors = FALSE
+      )
+
+      summary_women_comm[[length(summary_women_comm) + 1]] <- props_df
+    }
+  }
+}
+
+women_comm_summary_df <- do.call(rbind, summary_women_comm)
+
+cat("\nOverall proportions of women afraid by ideology and community size (all years, survey-weighted):\n")
+print(women_comm_summary_df, digits = 3)
+```
+
+## Analysis by Age: Women's Fear by Ideology and Age Group
+
+Age may be an important factor in fear of walking alone at night. We analyze the proportion of women who are afraid, stratified by political ideology and age group (under `r age_threshold` vs. `r age_threshold` and over).
+
+### Prepare data for women by age group
+
+```{r prepare-women-age-data}
+# Create dynamic age group labels based on age_threshold parameter
+age_label_younger <- paste0("Under ", age_threshold)
+age_label_older <- paste0(age_threshold, " and Over")
+
+# For the denominator (all women who answered the fear question) with age
+gss_women_age <- gss_all |>
+  select(year, polviews, fear, sex, age, vpsu, vstrat, wtssps) |>
+  filter(
+    !is.na(sex),
+    sex == 2,
+    !is.na(polviews),
+    polviews <= 7,
+    !is.na(fear),
+    fear <= 2,          # Both Yes and No responses
+    !is.na(age),
+    age >= 18,          # Adults only
+    !is.na(wtssps),
+    year >= min_year
+  ) |>
+  mutate(
+    polviews_grouped = case_when(
+      polviews %in% 1:3 ~ "Liberal",
+      polviews == 4 ~ "Moderate",
+      polviews %in% 5:7 ~ "Conservative",
+      TRUE ~ NA_character_
+    ),
+    age_group = case_when(
+      age < age_threshold ~ age_label_younger,
+      age >= age_threshold ~ age_label_older,
+      TRUE ~ NA_character_
+    ),
+    fear_yes = ifelse(fear == 1, 1, 0),
+    vpsu = as.numeric(vpsu),
+    vstrat = as.numeric(vstrat),
+    wtssps = as.numeric(wtssps),
+    stratvar = interaction(year, vstrat, drop = TRUE)
+  ) |>
+  filter(!is.na(polviews_grouped), !is.na(age_group))
+
+gss_women_age$polviews_grouped <- factor(
+  gss_women_age$polviews_grouped,
+  levels = c("Liberal", "Moderate", "Conservative")
+)
+
+gss_women_age$age_group <- factor(
+  gss_women_age$age_group,
+  levels = c(age_label_younger, age_label_older)
+)
+
+# Verify data availability
+cat("Total observations (women with fear responses and age):", nrow(gss_women_age), "\n")
+cat("Year range:", min(gss_women_age$year), "to", max(gss_women_age$year), "\n")
+cat("\nObservations by ideology group:\n")
+table(gss_women_age$polviews_grouped) |> print()
+cat("\nObservations by age group:\n")
+table(gss_women_age$age_group) |> print()
+cat("\nObservations by ideology and age group:\n")
+table(gss_women_age$polviews_grouped, gss_women_age$age_group) |> print()
+```
+
+### Create survey design for women by age analysis
+
+```{r women-age-survey-design}
+gss_women_age_design <- svydesign(
+  ids = ~vpsu,
+  strata = ~stratvar,
+  weights = ~wtssps,
+  data = gss_women_age,
+  nest = TRUE
+)
+```
+
+### Compute proportions of women afraid by ideology and age group
+
+```{r compute-women-age-pooled}
+# Unique survey years and pooling radius
+women_age_years <- sort(unique(gss_women_age$year))
+women_age_radius <- floor(pool_surveys / 2)
+
+cat("Survey years available:", paste(women_age_years, collapse = ", "), "\n")
+cat("Total number of surveys:", length(women_age_years), "\n\n")
+
+# Containers
+women_age_results <- list()
+
+ideology_groups_age <- levels(gss_women_age$polviews_grouped)
+age_groups <- levels(gss_women_age$age_group)
+
+for (i in seq_along(women_age_years)) {
+  target_year <- women_age_years[i]
+
+  # Determine which survey indices to pool
+  start_idx <- max(1, i - women_age_radius)
+  end_idx <- min(length(women_age_years), i + women_age_radius)
+  years_to_pool <- women_age_years[start_idx:end_idx]
+
+  pooled_data_indices <- which(gss_women_age$year %in% years_to_pool)
+
+  if (length(pooled_data_indices) > 0) {
+    pooled_design <- gss_women_age_design[pooled_data_indices, ]
+
+    for (ideol in ideology_groups_age) {
+      for (age_grp in age_groups) {
+        # Filter for this ideology-age combination
+        combo_indices <- which(
+          gss_women_age$polviews_grouped[pooled_data_indices] == ideol &
+          gss_women_age$age_group[pooled_data_indices] == age_grp
+        )
+
+        if (length(combo_indices) > 10) {  # Require minimum sample size
+          combo_design <- pooled_design[combo_indices, ]
+
+          # Proportion afraid (mean of binary fear_yes variable)
+          fear_mean <- svymean(
+            ~fear_yes,
+            design = combo_design,
+            na.rm = TRUE
+          )
+
+          prop_value <- as.numeric(fear_mean)
+          se_value <- as.numeric(SE(fear_mean))
+
+          props_df <- data.frame(
+            year = target_year,
+            ideology = ideol,
+            age_group = age_grp,
+            proportion_afraid = prop_value,
+            se = se_value,
+            ci_lower = prop_value - 1.96 * se_value,
+            ci_upper = prop_value + 1.96 * se_value,
+            n_surveys = length(years_to_pool),
+            stringsAsFactors = FALSE
+          )
+
+          women_age_results[[length(women_age_results) + 1]] <- props_df
+        }
+      }
+    }
+  }
+}
+
+# Combine results
+women_age_df <- do.call(rbind, women_age_results)
+
+women_age_df$ideology <- factor(
+  women_age_df$ideology,
+  levels = c("Liberal", "Moderate", "Conservative")
+)
+
+women_age_df$age_group <- factor(
+  women_age_df$age_group,
+  levels = c("Under 30", "30 and Over")
+)
+
+cat("Pooled estimates complete\n")
+head(women_age_df, 15)
+```
+
+### Plot: Women's fear by ideology and age group
+
+```{r women-age-plot, fig.width=12, fig.height=7}
+ggplot(women_age_df, aes(x = year, y = proportion_afraid, color = ideology, fill = ideology)) +
+  geom_ribbon(aes(ymin = ci_lower, ymax = ci_upper), alpha = 0.18, color = NA) +
+  geom_line(linewidth = 1) +
+  facet_wrap(~age_group, ncol = 1, scales = "free_y") +
+  scale_color_manual(values = ideology_colors, name = "Political Ideology") +
+  scale_fill_manual(values = ideology_colors, name = "Political Ideology") +
+  scale_y_continuous(labels = scales::percent_format()) +
+  labs(
+    title = "Women Afraid to Walk Alone at Night by Political Ideology and Age, USA, 1975-2024",
+    subtitle = paste0(
+      "Question: 'Is there any area right around here–that is, within a mile–where you would be\n\tafraid to walk alone at night?' (Women responding 'Yes')\n",
+      "General Social Survey (pooling ", pool_surveys, " surveys, centered).\n",
+      "Lines show survey-weighted proportions; ribbons are 95% confidence intervals."
+    ),
+    x = "Year",
+    y = "Proportion of women afraid",
+    caption = c("Data source: NORC General Social Survey (GSS)", "aaronjbecker.com")
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "bottom",
+    plot.title = element_text(size = 18, face = "bold"),
+    plot.subtitle = element_text(size=14),
+    strip.text = element_text(size = 12, face = "bold"),
+    axis.title = element_text(size = 14),
+    plot.caption = element_text(size = c(9, 14), hjust = c(0, 1), face=c("italic", "plain"))
+  )
+```
+
+### Summary statistics: Women's fear by ideology and age group (all years)
+
+```{r women-age-summary}
+# Compute overall proportions across all years
+women_age_overall <- gss_women_age_design
+
+summary_women_age <- list()
+
+for (ideol in ideology_groups_age) {
+  for (age_grp in age_groups) {
+    combo_indices <- which(
+      gss_women_age$polviews_grouped == ideol &
+      gss_women_age$age_group == age_grp
+    )
+
+    if (length(combo_indices) > 0) {
+      combo_design <- women_age_overall[combo_indices, ]
+
+      fear_mean <- svymean(~fear_yes, design = combo_design, na.rm = TRUE)
+
+      prop_value <- as.numeric(fear_mean)
+      se_value <- as.numeric(SE(fear_mean))
+
+      props_df <- data.frame(
+        ideology = ideol,
+        age_group = age_grp,
+        proportion_afraid = prop_value,
+        se = se_value,
+        stringsAsFactors = FALSE
+      )
+
+      summary_women_age[[length(summary_women_age) + 1]] <- props_df
+    }
+  }
+}
+
+women_age_summary_df <- do.call(rbind, summary_women_age)
+
+cat("\nOverall proportions of women afraid by ideology and age group (all years, survey-weighted):\n")
+print(women_age_summary_df, digits = 3)
+```
+
+## Notes
+
+- Uses the same rolling pooled estimation and survey design handling as the regional ideology analysis (`stratvar` interaction, `nest = TRUE`, `survey.lonely.psu = "adjust"`).
+- Ideology grouping follows the three-category system: Liberal (1-3), Moderate (4), Conservative (5-7).
+- The `fear` variable asks: "Is there any area right around here–that is, within a mile–where you would be afraid to walk alone at night?"
+- Valid responses are 1 (Yes) and 2 (No); other values are treated as missing data.
+- The faceted line plots show both response categories with trends over time and 95% confidence intervals for each group.
+- Includes gender-stratified analysis (women only, `sex == 2`) to examine whether fear patterns by ideology differ for female respondents.
+- Community size grouping based on `xnorcsiz`:
+  - **Urban**: Large and medium central cities (values 1-2)
+  - **Suburban**: Suburbs and unincorporated areas of cities (values 3-6)
+  - **Rural**: Small cities, towns, villages, and open country (values 7-10)
+- Age grouping for women's analysis (threshold set to `r age_threshold`):
+  - **Under `r age_threshold`**: Women aged 18-`r age_threshold - 1`
+  - **`r age_threshold` and Over**: Women aged `r age_threshold` and above
+- The community size and age analyses focus specifically on the proportion of women who report being afraid (fear=1), stratified by political ideology and the respective demographic characteristic.
