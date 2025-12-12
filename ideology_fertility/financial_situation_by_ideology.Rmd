@@ -1,6 +1,6 @@
 ---
 title: "Financial Situation Change by Political Ideology Over Time"
-author: "Analysis"
+author: "Aaron J Becker"
 date: "`r Sys.Date()`"
 output: html_document
 ---
@@ -201,7 +201,7 @@ head(results_df, 15)
 
 ## Plot: Financial situation change by ideology over time
 
-```{r financial-plot, fig.width=12, fig.height=11}
+```{r financial-plot, fig.width=10, fig.height=12.5}
 ideology_colors <- c(
   "Liberal" = "#1f77b4",
   "Moderate" = "#7f7f7f",
@@ -225,66 +225,29 @@ results_df$outcome_label <- factor(
 ggplot(results_df, aes(x = year, y = proportion, color = ideology, fill = ideology)) +
   geom_ribbon(aes(ymin = ci_lower, ymax = ci_upper), alpha = 0.18, color = NA) +
   geom_line(linewidth = 1) +
-  geom_point(size = 1.3) +
   facet_wrap(~outcome_label, ncol = 1, scales = "free_y") +
   scale_color_manual(values = ideology_colors, name = "Political Ideology") +
   scale_fill_manual(values = ideology_colors, name = "Political Ideology") +
   scale_y_continuous(labels = scales::percent_format()) +
   labs(
-    title = "Perceived Financial Situation Change by Political Ideology",
+    title = "Perceived Financial Situation Change by Political Ideology, USA, 1975-2024",
     subtitle = paste0(
-      "General Social Survey (pooling ", pool_surveys, " surveys)\n",
-      "Question: 'During the last few years, has your financial situation been getting better, worse, or stayed the same?'\n",
-      "Lines show survey-weighted proportions; ribbons are 95% confidence intervals"
+      "Question: 'During the last few years, has your financial situation been getting better, worse,\n\tor has it stayed the same?'\n",
+      "General Social Survey (pooling ", pool_surveys, " surveys, centered).\n",
+      "Lines show survey-weighted proportions; ribbons are 95% confidence intervals."
     ),
     x = "Year",
     y = "Proportion of respondents",
-    caption = "Data source: General Social Survey (GSS)"
+    caption = c("Data source: NORC General Social Survey (GSS)", "aaronjbecker.com")
   ) +
   theme_minimal() +
   theme(
     legend.position = "bottom",
-    plot.title = element_text(size = 14, face = "bold"),
+    plot.title = element_text(size = 18, face = "bold"),
+    plot.subtitle = element_text(size=14),
     strip.text = element_text(size = 12, face = "bold"),
-    axis.title = element_text(size = 11),
-    plot.caption = element_text(size = 9, hjust = 0)
-  )
-```
-
-## Stacked area chart alternative view
-
-For an alternative view showing the full distribution as stacked areas:
-
-```{r stacked-area, fig.width=12, fig.height=6}
-# Stacked area chart
-financial_colors <- c(
-  "Better" = "#2ca02c",
-  "Stayed Same" = "#ff7f0e",
-  "Worse" = "#d62728"
-)
-
-ggplot(results_df, aes(x = year, y = proportion, fill = financial_status)) +
-  geom_area(position = "stack", alpha = 0.8) +
-  facet_wrap(~ideology, ncol = 3) +
-  scale_fill_manual(values = financial_colors, name = "Financial Situation") +
-  scale_y_continuous(labels = scales::percent_format()) +
-  labs(
-    title = "Full Distribution of Financial Situation Perceptions by Ideology",
-    subtitle = paste0(
-      "General Social Survey (pooling ", pool_surveys, " surveys)\n",
-      "Stacked areas show proportion in each category within ideology group"
-    ),
-    x = "Year",
-    y = "Proportion",
-    caption = "Data source: General Social Survey (GSS)"
-  ) +
-  theme_minimal() +
-  theme(
-    legend.position = "bottom",
-    plot.title = element_text(size = 14, face = "bold"),
-    strip.text = element_text(size = 11, face = "bold"),
-    axis.title = element_text(size = 11),
-    plot.caption = element_text(size = 9, hjust = 0)
+    axis.title = element_text(size = 14),
+    plot.caption = element_text(size = c(9, 14), hjust = c(0, 1), face=c("italic", "plain"))
   )
 ```
 
@@ -502,7 +465,6 @@ party_results_df$outcome_label <- factor(
 ggplot(party_results_df, aes(x = year, y = proportion, color = party, fill = party)) +
   geom_ribbon(aes(ymin = ci_lower, ymax = ci_upper), alpha = 0.18, color = NA) +
   geom_line(linewidth = 1) +
-  geom_point(size = 1.3) +
   facet_wrap(~outcome_label, ncol = 1, scales = "free_y") +
   scale_color_manual(values = party_colors, name = "Party Identification") +
   scale_fill_manual(values = party_colors, name = "Party Identification") +
@@ -523,41 +485,6 @@ ggplot(party_results_df, aes(x = year, y = proportion, color = party, fill = par
     legend.position = "bottom",
     plot.title = element_text(size = 14, face = "bold"),
     strip.text = element_text(size = 12, face = "bold"),
-    axis.title = element_text(size = 11),
-    plot.caption = element_text(size = 9, hjust = 0)
-  )
-```
-
-### Stacked area chart by party identification
-
-```{r party-stacked-area, fig.width=12, fig.height=6}
-# Stacked area chart
-financial_colors <- c(
-  "Better" = "#2ca02c",
-  "Stayed Same" = "#ff7f0e",
-  "Worse" = "#d62728"
-)
-
-ggplot(party_results_df, aes(x = year, y = proportion, fill = financial_status)) +
-  geom_area(position = "stack", alpha = 0.8) +
-  facet_wrap(~party, ncol = 3) +
-  scale_fill_manual(values = financial_colors, name = "Financial Situation") +
-  scale_y_continuous(labels = scales::percent_format()) +
-  labs(
-    title = "Full Distribution of Financial Situation Perceptions by Party ID",
-    subtitle = paste0(
-      "General Social Survey (pooling ", pool_surveys, " surveys)\n",
-      "Stacked areas show proportion in each category within party identification group"
-    ),
-    x = "Year",
-    y = "Proportion",
-    caption = "Data source: General Social Survey (GSS)"
-  ) +
-  theme_minimal() +
-  theme(
-    legend.position = "bottom",
-    plot.title = element_text(size = 14, face = "bold"),
-    strip.text = element_text(size = 11, face = "bold"),
     axis.title = element_text(size = 11),
     plot.caption = element_text(size = 9, hjust = 0)
   )
